@@ -1,4 +1,11 @@
-"""Chainlit chat app that talks to Claude and proxies tool calls to snipeit-mcp."""
+"""Chainlit chat app over claude-agent-sdk with Snipe-IT MCP.
+
+Auth modes:
+  * API-key:     set ANTHROPIC_API_KEY.
+  * Subscription: leave ANTHROPIC_API_KEY unset; mount host ~/.claude at
+                  /home/appuser/.claude so the bundled Claude Code CLI can
+                  supply its OAuth session.
+"""
 
 from __future__ import annotations
 
@@ -7,15 +14,21 @@ import os
 from pathlib import Path
 
 import chainlit as cl
-import chainlit.data as cl_data
-from anthropic import AsyncAnthropic
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+    query,
+)
 
 MCP_URL = os.environ["MCP_URL"]
-MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6")
-MAX_TOKENS = int(os.getenv("ANTHROPIC_MAX_TOKENS", "4096"))
+MODEL = os.getenv("ANTHROPIC_MODEL") or None
 DB_PATH = os.getenv("CHAT_DB_PATH", "/data/chat.db")
 FILES_DIR = os.getenv("CHAT_FILES_DIR", "/data/files")
 
@@ -35,28 +48,18 @@ Workflow for queries:
 Always confirm destructive actions (delete, check out to a different user) before executing them.
 """
 
-anthropic = AsyncAnthropic()
+MCP_SERVERS = {"snipeit": {"type": "http", "url": MCP_URL}}
+ALLOWED_TOOLS = ["mcp__snipeit__*"]
 
 Path(FILES_DIR).mkdir(parents=True, exist_ok=True)
 
 
-@cl_data.data_layer
+@cl.data_layer
 def _data_layer() -> SQLAlchemyDataLayer:
     return SQLAlchemyDataLayer(conninfo=f"sqlite+aiosqlite:///{DB_PATH}")
 
 
-def _mcp_tools_to_anthropic(tools) -> list[dict]:
-    return [
-        {
-            "name": t.name,
-            "description": t.description or "",
-            "input_schema": t.inputSchema,
-        }
-        for t in tools
-    ]
-
-
-def _build_user_content(msg: cl.Message) -> list[dict]:
+def _user_msg_from_chainlit(msg: cl.Message) -> dict:
     content: list[dict] = []
     for el in msg.elements or []:
         mime = getattr(el, "mime", "") or ""
@@ -72,16 +75,31 @@ def _build_user_content(msg: cl.Message) -> list[dict]:
             )
     if msg.content:
         content.append({"type": "text", "text": msg.content})
-    return content
+    payload = content if content else (msg.content or "")
+    return {"type": "user", "message": {"role": "user", "content": payload}}
 
 
-def _extract_text(result) -> str:
-    parts = []
-    for c in result.content or []:
-        text = getattr(c, "text", None)
-        if text:
-            parts.append(text)
-    return "\n".join(parts) if parts else "(tool returned no text)"
+async def _replay(history: list[dict]):
+    for item in history:
+        yield item
+
+
+def _tool_result_text(content) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text")
+                if text:
+                    parts.append(text)
+            else:
+                parts.append(str(block))
+        return "\n".join(parts)
+    return str(content)
 
 
 @cl.on_chat_start
@@ -92,56 +110,63 @@ async def on_chat_start() -> None:
 @cl.on_message
 async def on_message(msg: cl.Message) -> None:
     history: list[dict] = cl.user_session.get("history") or []
-    history.append({"role": "user", "content": _build_user_content(msg)})
+    history.append(_user_msg_from_chainlit(msg))
 
-    async with streamablehttp_client(MCP_URL) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = _mcp_tools_to_anthropic((await session.list_tools()).tools)
+    options = ClaudeAgentOptions(
+        system_prompt=SYSTEM_PROMPT,
+        mcp_servers=MCP_SERVERS,
+        allowed_tools=ALLOWED_TOOLS,
+        model=MODEL,
+    )
 
-            while True:
-                resp = await anthropic.messages.create(
-                    model=MODEL,
-                    max_tokens=MAX_TOKENS,
-                    system=SYSTEM_PROMPT,
-                    tools=tools,
-                    messages=history,
-                )
-                history.append(
-                    {"role": "assistant", "content": [b.model_dump() for b in resp.content]}
-                )
+    open_steps: dict[str, cl.Step] = {}
+    reply = cl.Message(content="")
+    await reply.send()
+    assistant_had_text = False
 
-                if resp.stop_reason != "tool_use":
-                    break
+    async for message in query(prompt=_replay(history), options=options):
+        if isinstance(message, SystemMessage) and message.subtype == "init":
+            failed = [
+                s
+                for s in (message.data.get("mcp_servers") or [])
+                if s.get("status") and s.get("status") != "connected"
+            ]
+            if failed:
+                await cl.Message(
+                    content=f"MCP server(s) not connected: {failed}",
+                    author="system",
+                ).send()
 
-                tool_results = []
-                for block in resp.content:
-                    if block.type != "tool_use":
-                        continue
-                    async with cl.Step(name=block.name, type="tool") as step:
-                        step.input = block.input
-                        try:
-                            result = await session.call_tool(
-                                block.name, block.input or {}
-                            )
-                            output = _extract_text(result)
-                            is_error = bool(getattr(result, "isError", False))
-                        except Exception as exc:
-                            output = f"MCP call failed: {exc!r}"
-                            is_error = True
-                        step.output = output
-                        if is_error:
+        elif isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    await reply.stream_token(block.text)
+                    assistant_had_text = True
+                elif isinstance(block, ToolUseBlock):
+                    step = cl.Step(name=block.name, type="tool")
+                    step.input = block.input
+                    await step.send()
+                    open_steps[block.id] = step
+
+        elif isinstance(message, UserMessage):
+            blocks = message.content if isinstance(message.content, list) else []
+            for block in blocks:
+                if isinstance(block, ToolResultBlock):
+                    step = open_steps.pop(block.tool_use_id, None)
+                    if step is not None:
+                        step.output = _tool_result_text(block.content)
+                        if block.is_error:
                             step.is_error = True
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": output,
-                            "is_error": is_error,
-                        }
-                    )
-                history.append({"role": "user", "content": tool_results})
+                        await step.update()
 
-    final = "".join(b.text for b in resp.content if b.type == "text")
+        elif isinstance(message, ResultMessage):
+            if message.subtype and message.subtype.startswith("error"):
+                await cl.Message(
+                    content=f"Agent error: {message.subtype} (stop_reason={message.stop_reason}).",
+                    author="system",
+                ).send()
+
+    if not assistant_had_text:
+        reply.content = "(no response)"
+    await reply.update()
     cl.user_session.set("history", history)
-    await cl.Message(content=final or "(no response)").send()

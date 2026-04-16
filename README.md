@@ -8,22 +8,42 @@ Two containers, both internal to your Coolify host:
 - `snipeit-mcp` — [jameshgordy/snipeit-mcp](https://github.com/jameshgordy/snipeit-mcp)
   built from source, run in HTTP transport. Talks to Snipe-IT over the
   internal Docker network.
-- `snipeit-chat` — Chainlit app. Claude client with vision + MCP tool-use loop.
-  The only service that publishes a port.
+- `snipeit-chat` — Chainlit app. Built on **claude-agent-sdk** — supports
+  either Anthropic API-key billing or your Claude Code subscription. The only
+  service that publishes a port.
 
 Nothing is exposed to the public internet. Access is meant to be Tailscale-only.
+
+## Auth modes — pick one
+
+**A. API-key mode.** Set `ANTHROPIC_API_KEY` in `.env`. Pay-per-token, no host
+setup needed.
+
+**B. Subscription mode (Claude Pro/Max).** Leave `ANTHROPIC_API_KEY` blank.
+On the host, run `claude login` once so `~/.claude` holds a valid OAuth
+session. `docker-compose.yml` mounts that directory read-only into the chat
+container; the bundled Claude Code CLI there reuses your session. Rate limits
+are tuned for interactive use — fine for ad-hoc photo uploads from your
+phone, not for bulk imports.
+
+The image includes the Claude Code CLI unconditionally, so switching between
+modes is just editing `.env` and restarting the container. If your `~/.claude`
+lives somewhere non-standard, set `CLAUDE_HOST_DIR` in `.env`.
 
 ## Prerequisites
 
 - Coolify host with an existing Snipe-IT container running.
 - Snipe-IT API token (Snipe-IT → your profile → Manage API Tokens).
-- Anthropic API key.
+- Either an Anthropic API key **or** Claude Code authenticated on the host
+  (`claude login`).
 - Your Snipe-IT container reachable on the same Docker network as this stack
   (see Coolify step 3 below).
 
 ## Setup
 
 1. Copy `.env.example` → `.env` and fill in every field.
+   - Pick an auth mode (see above). For subscription mode, run
+     `claude login` on the host first.
    - `SNIPEIT_URL` must be the **Docker-internal** URL of Snipe-IT
      (e.g. `http://snipe-it:80`). Not the public one.
    - Generate `CHAINLIT_AUTH_SECRET` with
@@ -84,10 +104,14 @@ Run these in order:
   `@cl.password_auth_callback` in `chat/app.py`.
 - **Fewer tools**: trim `SNIPEIT_ALLOWED_TOOLS` in `.env` to reduce the tool
   schema sent on every Claude call.
-- **Prompt caching**: wrap the `tools` array with `cache_control` in
-  `app.py` if tool schemas are bloating your per-request cost.
 - **Different model**: `ANTHROPIC_MODEL=claude-sonnet-4-6` is cheaper and
   faster; Opus is better at photo-to-structured-data.
+- **Session resume**: replace message replay in `chat/app.py` with
+  `resume=session_id` from the previous turn's `ResultMessage` — cheaper and
+  simpler once the flow is stable.
+- **Image fallback**: if multimodal-through-streaming-input misbehaves, save
+  uploads under `/data/files/` and add `"Read"` to `allowed_tools` so the
+  agent reads images via Claude Code's built-in Read tool.
 
 ## Layout
 

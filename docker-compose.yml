@@ -1,12 +1,9 @@
 services:
   snipeit-mcp:
-    build: https://github.com/jameshgordy/snipeit-mcp.git#main
-    # Upstream Dockerfile ENTRYPOINTs `snipeit-mcp` which runs stdio.
-    # Override to launch FastMCP in HTTP transport for in-network access.
-    entrypoint: ["fastmcp", "run", "server.py",
-                 "--transport", "http",
-                 "--host", "0.0.0.0",
-                 "--port", "8000"]
+    # Local Dockerfile wraps upstream with two fixes: pin fastmcp==2.12.4
+    # (upstream's server.py uses internal API that newer fastmcp removed) and
+    # launch over HTTP. See mcp/Dockerfile for details.
+    build: ./mcp
     environment:
       SNIPEIT_URL: ${SNIPEIT_URL}
       SNIPEIT_TOKEN: ${SNIPEIT_TOKEN}
@@ -17,15 +14,24 @@ services:
   snipeit-chat:
     build: ./chat
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      # API-key mode: set this. Subscription mode: leave blank (and make sure
+      # the CLAUDE_CONFIG_DIR mount below points at an authenticated ~/.claude).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-6}
-      ANTHROPIC_MAX_TOKENS: ${ANTHROPIC_MAX_TOKENS:-4096}
       MCP_URL: http://snipeit-mcp:8000/mcp/
       CHAT_DB_PATH: /data/chat.db
       CHAT_FILES_DIR: /data/files
       CHAINLIT_AUTH_SECRET: ${CHAINLIT_AUTH_SECRET}
     volumes:
       - chatdata:/data
+      # Subscription-auth mount. Points at a host directory holding a
+      # Claude-Code-authenticated ~/.claude. Safe to leave mounted in API-key
+      # mode — the SDK ignores it when ANTHROPIC_API_KEY is set.
+      # Override CLAUDE_HOST_DIR in .env if your creds live elsewhere.
+      # Mounted rw because the bundled `claude` CLI writes lockfiles/session
+      # state; a :ro mount makes it report "Not logged in". Container and host
+      # Claude sessions will share state.
+      - ${CLAUDE_HOST_DIR:-${HOME}/.claude}:/home/appuser/.claude
     ports:
       # Coolify binds this to the Tailscale interface.
       # Do NOT assign a public domain / Cloudflare tunnel to this service.
