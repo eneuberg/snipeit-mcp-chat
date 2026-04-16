@@ -1,0 +1,30 @@
+[project]
+enable_telemetry = false
+user_env = []
+session_timeout = 3600
+cache = false
+
+[features]
+unsafe_allow_html = false
+latex = false
+auto_tag_thread = true
+
+[features.spontaneous_file_upload]
+  enabled = true
+  accept = ["image/*"]
+  max_files = 4
+  max_size_mb = 20
+
+# Disable Chainlit's built-in user-configurable MCP sidebar — our MCP
+# connection is wired server-side in app.py, not picked by the end user.
+[features.mcp]
+  enabled = false
+
+[UI]
+name = "Snipe-IT Chat"
+show_readme_as_default = true
+default_collapse_content = true
+cot = "tool_call"
+
+[meta]
+generated_by = "snipeit-chat-stack"

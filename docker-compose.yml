@@ -1,0 +1,43 @@
+services:
+  snipeit-mcp:
+    build: https://github.com/jameshgordy/snipeit-mcp.git#main
+    # Upstream Dockerfile ENTRYPOINTs `snipeit-mcp` which runs stdio.
+    # Override to launch FastMCP in HTTP transport for in-network access.
+    entrypoint: ["fastmcp", "run", "server.py",
+                 "--transport", "http",
+                 "--host", "0.0.0.0",
+                 "--port", "8000"]
+    environment:
+      SNIPEIT_URL: ${SNIPEIT_URL}
+      SNIPEIT_TOKEN: ${SNIPEIT_TOKEN}
+      SNIPEIT_ALLOWED_TOOLS: ${SNIPEIT_ALLOWED_TOOLS}
+    networks: [internal]
+    restart: unless-stopped
+
+  snipeit-chat:
+    build: ./chat
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-6}
+      ANTHROPIC_MAX_TOKENS: ${ANTHROPIC_MAX_TOKENS:-4096}
+      MCP_URL: http://snipeit-mcp:8000/mcp/
+      CHAT_DB_PATH: /data/chat.db
+      CHAT_FILES_DIR: /data/files
+      CHAINLIT_AUTH_SECRET: ${CHAINLIT_AUTH_SECRET}
+    volumes:
+      - chatdata:/data
+    ports:
+      # Coolify binds this to the Tailscale interface.
+      # Do NOT assign a public domain / Cloudflare tunnel to this service.
+      - "8000:8000"
+    depends_on:
+      - snipeit-mcp
+    networks: [internal]
+    restart: unless-stopped
+
+volumes:
+  chatdata:
+
+networks:
+  internal:
+    driver: bridge
