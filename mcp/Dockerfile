@@ -26,6 +26,8 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin/ /usr/local/bin/
 
 WORKDIR /app
+# Patch snipeit-api client: allow plain http:// URLs (not just https:// / localhost)
+RUN python3 -c "import pathlib; p=pathlib.Path('/usr/local/lib/python3.12/site-packages/snipeit/client.py'); t=p.read_text(); t=t.replace('\"http://localhost\"','\"http://\"'); p.write_text(t)"
 COPY --from=builder --chown=appuser:appuser /build/server.py ./
 COPY --from=builder --chown=appuser:appuser /build/prompts/ prompts/
 

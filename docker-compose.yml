@@ -8,42 +8,9 @@ services:
       SNIPEIT_URL: ${SNIPEIT_URL}
       SNIPEIT_TOKEN: ${SNIPEIT_TOKEN}
       SNIPEIT_ALLOWED_TOOLS: ${SNIPEIT_ALLOWED_TOOLS}
-    networks: [internal]
-    restart: unless-stopped
-
-  snipeit-chat:
-    build: ./chat
-    environment:
-      # API-key mode: set this. Subscription mode: leave blank (and make sure
-      # the CLAUDE_CONFIG_DIR mount below points at an authenticated ~/.claude).
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-6}
-      MCP_URL: http://snipeit-mcp:8000/mcp/
-      CHAT_DB_PATH: /data/chat.db
-      CHAT_FILES_DIR: /data/files
-      CHAINLIT_AUTH_SECRET: ${CHAINLIT_AUTH_SECRET}
-    volumes:
-      - chatdata:/data
-      # Subscription-auth mount. Points at a host directory holding a
-      # Claude-Code-authenticated ~/.claude. Safe to leave mounted in API-key
-      # mode — the SDK ignores it when ANTHROPIC_API_KEY is set.
-      # Override CLAUDE_HOST_DIR in .env if your creds live elsewhere.
-      # Mounted rw because the bundled `claude` CLI writes lockfiles/session
-      # state; a :ro mount makes it report "Not logged in". Container and host
-      # Claude sessions will share state.
-      - ${CLAUDE_HOST_DIR:-${HOME}/.claude}:/home/appuser/.claude
     ports:
-      # Coolify binds this to the Tailscale interface.
-      # Do NOT assign a public domain / Cloudflare tunnel to this service.
-      - "8000:8000"
-    depends_on:
-      - snipeit-mcp
-    networks: [internal]
+      # Loopback-only: CloudCLI on the host reaches MCP at
+      # http://127.0.0.1:8765/mcp/. Not exposed on the tailnet — only the
+      # CloudCLI UI itself should be tailnet-reachable.
+      - "127.0.0.1:8765:8000"
     restart: unless-stopped
-
-volumes:
-  chatdata:
-
-networks:
-  internal:
-    driver: bridge
