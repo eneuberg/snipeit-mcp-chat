@@ -1,39 +1,41 @@
 services:
   snipeit-mcp:
+    # `build` + `image`: locally `docker compose build` uses the Dockerfile
+    # and tags with the image name; on Coolify / prod, if the image already
+    # exists in the registry, compose pulls it and skips the build.
+    build: ./mcp
     image: ghcr.io/eneuberg/snipeit-mcp-chat/snipeit-mcp:latest
     environment:
       SNIPEIT_URL: '${SNIPEIT_URL}'
       SNIPEIT_TOKEN: '${SNIPEIT_TOKEN}'
       SNIPEIT_ALLOWED_TOOLS: '${SNIPEIT_ALLOWED_TOOLS}'
-    ports:
-      - '127.0.0.1:8765:8000'
+    volumes:
+      # asset_files / asset_thumbnail open uploaded paths locally before
+      # POSTing to Snipe-IT, so share webui's upload dir read-only.
+      - webui_workspace:/workspace:ro
     restart: unless-stopped
 
   webui:
+    build: ./webui
     image: ghcr.io/eneuberg/snipeit-mcp-chat/webui:latest
     environment:
-      PORT: 8080
+      # Port the proxy listens on inside the container. Coolify maps this
+      # through its Traefik; locally, docker publishes it via `ports`.
+      PORT: 3583
       HOST: 0.0.0.0
-    expose:
-      - "8080"
+      # Rewrites the seeded .claude.json's MCP URL on first boot so Claude
+      # reaches the MCP container over the docker network instead of the
+      # host-loopback URL that was baked into the host's config.
+      MCP_URL: http://snipeit-mcp:8000/mcp/
+    ports:
+      - '${WEBUI_PORT:-3583}:3583'
     volumes:
       - webui_home:/home/node
       - webui_workspace:/workspace
       - '${CLAUDE_HOST_DIR}:/seed/claude:ro'
       - '${CLAUDE_CONFIG_FILE}:/seed/claude.json:ro'
-    restart: unless-stopped
-
-  proxy:
-    build:
-      context: ./proxy
-    environment:
-      PORT: 3583
-      HOST: 0.0.0.0
-      UPSTREAM: http://webui:8080
-    ports:
-      - "3583:3583"
     depends_on:
-      - webui
+      - snipeit-mcp
     restart: unless-stopped
 
 volumes:

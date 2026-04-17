@@ -49,10 +49,11 @@ RUN install -d -o node -g node -m 755 /workspace
 USER node
 WORKDIR /home/node
 
-ENV PORT=8080 HOST=0.0.0.0
+ENV PORT=3583 HOST=0.0.0.0
 
-EXPOSE 8080
+EXPOSE 3583
 ENTRYPOINT ["tini", "--", "webui-entrypoint"]
-# The proxy binds :8080 and spawns claude-code-webui on 127.0.0.1:8079
-# internally, passing --claude-path so the SDK spawn doesn't ENOENT.
+# The proxy binds :$PORT (default 3583) and spawns claude-code-webui on
+# 127.0.0.1:8079 internally, passing --claude-path so the SDK spawn
+# doesn't ENOENT.
 CMD ["node", "/usr/local/bin/webui-proxy.js"]

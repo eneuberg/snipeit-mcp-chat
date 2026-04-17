@@ -18,8 +18,14 @@ if [ ! -f "$CLAUDE_JSON" ] && [ -f /seed/claude.json ]; then
     # Keep only MCP servers; seed a single /workspace project so the UI
     # has something to open on first boot. Drop host projects to avoid
     # dead-link entries pointing at paths that don't exist in-container.
-    jq '{
-        mcpServers: (.mcpServers // {}),
+    # Rewrite the snipeit MCP server URL to MCP_URL so the container
+    # reaches MCP over docker DNS (snipeit-mcp:8000) instead of the
+    # host-loopback URL baked into the host's config.
+    jq --arg mcp_url "${MCP_URL:-http://snipeit-mcp:8000/mcp/}" '{
+        mcpServers: (
+            (.mcpServers // {})
+            | if has("snipeit") then .snipeit.url = $mcp_url else . end
+        ),
         projects: {"/workspace": {}}
     }' /seed/claude.json > "$CLAUDE_JSON"
     chmod 600 "$CLAUDE_JSON"
