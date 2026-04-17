@@ -13,9 +13,9 @@ import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 
-const UPSTREAM_PORT = 8079;
 const LISTEN_PORT = Number(process.env.PORT || 3583);
 const LISTEN_HOST = process.env.HOST || "0.0.0.0";
+const UPSTREAM = process.env.UPSTREAM || "http://127.0.0.1:8080";
 const HOME = process.env.HOME;
 const CLAUDE_JSON = `${HOME}/.claude.json`;
 const PROJECTS_DIR = `${HOME}/.claude/projects`;
@@ -224,51 +224,30 @@ function readBody(req) {
   });
 }
 
-function proxyRequest(req, res, { interceptHtml }) {
-  const headers = { ...req.headers, host: `127.0.0.1:${UPSTREAM_PORT}` };
-  // When we need to rewrite the body, force identity so upstream doesn't
-  // gzip/br it out from under us.
-  if (interceptHtml) headers["accept-encoding"] = "identity";
-  const upstreamReq = http.request(
-    {
-      host: "127.0.0.1",
-      port: UPSTREAM_PORT,
-      method: req.method,
-      path: req.url,
-      headers,
+function proxyRequest(req, res) {
+  const target = new URL(UPSTREAM);
+  
+  const options = {
+    hostname: target.hostname,
+    port: target.port,
+    path: req.url,
+    method: req.method,
+    headers: {
+      ...req.headers,
+      host: target.host,
     },
-    (upstreamRes) => {
-      const ct = upstreamRes.headers["content-type"] || "";
-      if (interceptHtml && ct.includes("text/html")) {
-        const chunks = [];
-        upstreamRes.on("data", (c) => chunks.push(c));
-        upstreamRes.on("end", () => {
-          let body = Buffer.concat(chunks).toString("utf8");
-          const tag = '<script src="/_ext/inject.js"></script>';
-          if (body.includes("</body>") && !body.includes(tag)) {
-            body = body.replace("</body>", `  ${tag}\n  </body>`);
-          }
-          const out = Buffer.from(body, "utf8");
-          const outHeaders = { ...upstreamRes.headers };
-          delete outHeaders["content-encoding"];
-          outHeaders["content-length"] = String(out.length);
-          res.writeHead(upstreamRes.statusCode, outHeaders);
-          res.end(out);
-        });
-        upstreamRes.on("error", (e) => {
-          res.writeHead(502);
-          res.end("upstream error: " + e.message);
-        });
-      } else {
-        res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
-        upstreamRes.pipe(res);
-      }
-    },
-  );
-  upstreamReq.on("error", (e) => {
-    if (!res.headersSent) res.writeHead(502);
-    res.end("upstream error: " + e.message);
+  };
+
+  const upstreamReq = http.request(options, (upstreamRes) => {
+    res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+    upstreamRes.pipe(res);
   });
+
+  upstreamReq.on("error", (err) => {
+    if (!res.headersSent) res.writeHead(502);
+    res.end("upstream error: " + err.message);
+  });
+
   req.pipe(upstreamReq);
 }
 
@@ -321,24 +300,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const child = spawn(
-  "claude-code-webui",
-  [
-    "--host",
-    "127.0.0.1",
-    "--port",
-    String(UPSTREAM_PORT),
-    "--claude-path",
-    "/usr/local/bin/claude",
-  ],
-  { stdio: "inherit" },
-);
-child.on("exit", (code, sig) => {
-  console.error(`[proxy] upstream exited code=${code} sig=${sig}`);
-  process.exit(code ?? 1);
-});
 for (const sig of ["SIGINT", "SIGTERM"]) {
-  process.on(sig, () => child.kill(sig));
+  //process.on(sig, () => child.kill(sig));
 }
 
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {

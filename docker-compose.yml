@@ -11,17 +11,29 @@ services:
 
   webui:
     image: ghcr.io/eneuberg/snipeit-mcp-chat/webui:latest
-    network_mode: host
     environment:
-      PORT: 3583
+      PORT: 8080
       HOST: 0.0.0.0
+    expose:
+      - "8080"
     volumes:
       - webui_home:/home/node
       - webui_workspace:/workspace
       - '${CLAUDE_HOST_DIR}:/seed/claude:ro'
       - '${CLAUDE_CONFIG_FILE}:/seed/claude.json:ro'
+    restart: unless-stopped
+
+  proxy:
+    build:
+      context: ./proxy
+    environment:
+      PORT: 3583
+      HOST: 0.0.0.0
+      UPSTREAM: http://webui:8080
+    ports:
+      - "3583:3583"
     depends_on:
-      - snipeit-mcp
+      - webui
     restart: unless-stopped
 
 volumes:
