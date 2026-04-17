@@ -144,7 +144,6 @@ The host home is otherwise not visible inside the container. Use
   ```sh
   claude mcp add --transport http snipeit http://127.0.0.1:8765/mcp/
   ```
-  API-key mode also works — see *Auth modes* below.
 
 ## Setup
 
@@ -289,12 +288,14 @@ at paths that don't contain a fresh `.credentials.json`. Check `$HOME`
 in the shell you ran `docker compose` in, and override
 `CLAUDE_HOST_DIR` / `CLAUDE_CONFIG_FILE` in `.env` if needed.
 
-## Auth modes
+## Auth
 
-- **Subscription (default).** `claude login` on the host, nothing else
-  required. Rate-limits tuned for interactive use — fine for ad-hoc photos
-  from your phone, not for bulk imports.
-- **API key.** Put `ANTHROPIC_API_KEY=sk-ant-...` in `.env`. Pay-per-token.
+Auth is subscription-only: `claude login` on the host, nothing else
+required. Rate-limits tuned for interactive use — fine for ad-hoc photos
+from your phone, not for bulk imports. API-key auth isn't wired up — the
+chat container uses the bundled Claude Code CLI against the OAuth session
+copied in from the seed mount, and neither `docker-compose.yml` nor the
+entrypoint reads `ANTHROPIC_API_KEY`.
 
 ## Verification
 
