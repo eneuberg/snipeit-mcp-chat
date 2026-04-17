@@ -196,7 +196,16 @@ To attach a photo, use the paperclip button inside the chat input. On
 mobile it opens the camera directly; on desktop it opens the file
 picker. The image is uploaded to `/workspace/_uploads/` and its
 absolute path is appended to your message — Claude reads it via its
-`Read` tool. Prune with
+`Read` tool. Two MCP hooks land the photo in Snipe-IT itself:
+
+- `asset_files` — ask "attach this to asset 42" → shows up on the
+  asset's **Files** tab.
+- `asset_thumbnail` — ask "use this as the thumbnail of asset 42" →
+  replaces the asset's main image (header + list views). This one is
+  a local extension on top of upstream snipeit-mcp (see
+  `mcp/asset_thumbnail_tool.py`).
+
+Prune uploads with
 `docker compose exec webui rm -rf /workspace/_uploads/*`.
 
 ## Cheat sheet

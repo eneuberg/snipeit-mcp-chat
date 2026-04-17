@@ -31,6 +31,13 @@ RUN python3 -c "import pathlib; p=pathlib.Path('/usr/local/lib/python3.12/site-p
 COPY --from=builder --chown=appuser:appuser /build/server.py ./
 COPY --from=builder --chown=appuser:appuser /build/prompts/ prompts/
 
+# Local extension: `asset_thumbnail` tool — the upstream MCP only covers the
+# Files-tab upload via `asset_files`; this adds the main-image (thumbnail)
+# endpoint. Registered by importing the module just before the allowed-tools
+# whitelist filter runs, so the tool name is subject to SNIPEIT_ALLOWED_TOOLS.
+COPY --chown=appuser:appuser asset_thumbnail_tool.py ./
+RUN sed -i '/^SNIPEIT_ALLOWED_TOOLS = os.getenv/i import asset_thumbnail_tool  # noqa: F401 -- registers asset_thumbnail via @mcp.tool side effect\n' /app/server.py
+
 USER appuser
 
 EXPOSE 8000
