@@ -1,91 +1,132 @@
 # snipeit-chat-stack
 
-Phone-friendly chat UI for Snipe-IT inventory, using your Claude Pro/Max
-subscription (or an API key) through [CloudCLI](https://github.com/siteboon/claudecodeui).
+Phone-friendly chat UI for [Snipe-IT](https://snipeitapp.com/) inventory,
+using your Claude Pro/Max subscription (or an API key) through
+[sugyan/claude-code-webui](https://github.com/sugyan/claude-code-webui).
 Photograph an item, let Claude identify it and populate the Snipe-IT record
-via the MCP server.
+via MCP.
 
-Designed to run on a Raspberry Pi via Coolify, reachable only over Tailscale.
+Runs on any Docker host — developed on Ubuntu with snap Docker, should also
+work on a Raspberry Pi. The UI is reachable only over Tailscale; nothing is
+exposed to the public internet.
 
 ## Architecture
 
-Two containers, shared Docker network:
+Two containers:
 
 - **`snipeit-mcp`** — wraps [jameshgordy/snipeit-mcp](https://github.com/jameshgordy/snipeit-mcp)
-  with the patches below. Exposes Snipe-IT's API as 38 MCP tools over
-  Streamable-HTTP. Talks to your existing Snipe-IT instance over HTTP.
-- **`cloudcli`** — [siteboon/claudecodeui](https://github.com/siteboon/claudecodeui),
-  a mobile-first web UI for Claude Code. Reads `/home/appuser/.claude` for
-  your OAuth session, connects to `snipeit-mcp` via the internal network,
-  serves the web UI on port 3001. This is the only container that publishes
-  a port — bind it to your Tailscale interface.
+  with the patches listed below. Exposes Snipe-IT's API as MCP tools over
+  Streamable-HTTP. Published on `127.0.0.1:8765` only (not tailnet-reachable).
+- **`webui`** — [sugyan/claude-code-webui](https://github.com/sugyan/claude-code-webui)
+  with the patches listed below. Shells out to the `claude` CLI (bundled in
+  the image) which talks to `snipeit-mcp` using the MCP config in your
+  host's `~/.claude.json`. Uses `network_mode: host` and listens on `:8080`
+  so the loopback MCP URL resolves identically in-container and the UI is
+  reachable on the tailnet interface.
 
-Nothing is exposed to the public internet.
+Configuration (OAuth session, MCP servers, project history) lives on the
+host in `~/.claude/` + `~/.claude.json` and is bind-mounted into the webui
+container read-write. Configure once with `claude login` / `claude mcp
+add`, and it persists across rebuilds until you delete it.
 
 ## Upstream bugs we patch
 
-Three fixes live in `mcp/Dockerfile`:
+### `mcp/Dockerfile` (3 fixes)
 
-1. **Pin `fastmcp==2.12.4`** — upstream's `uv.lock` pins this version, but
+1. **Pin `fastmcp==2.12.4`.** Upstream's `uv.lock` pins this version, but
    their Dockerfile does `uv pip install .` which ignores the lockfile and
-   pulls the latest. Newer `fastmcp` removed the `_tool_manager` internal
-   attribute that upstream's `server.py` references (around line 5410), so
-   the server crashes on startup.
+   pulls the latest. Newer `fastmcp` removed the `_tool_manager` attribute
+   that upstream's `server.py` references, so the server crashes on start.
 
-2. **Launch via `python -c "from server import mcp; mcp.run(...)"`** — the
-   upstream runtime image doesn't put the `fastmcp` CLI on `PATH`. We skip
-   it and call `mcp.run(transport='http', host='0.0.0.0', port=8000)`
-   directly.
+2. **Launch with `python -c "from server import mcp; mcp.run(...)"`.** The
+   upstream runtime image doesn't have the `fastmcp` CLI on PATH.
 
-3. **Patch `snipeit-api` URL validation** — the `lfctech/snipeit-python-api`
-   client library (used by most tool functions) has a hard check:
+3. **Patch `snipeit-api` URL validation.** The `lfctech/snipeit-python-api`
+   client (used by most tool functions) hard-rejects plain `http://` URLs:
    ```python
    if not url.startswith("https://") and not url.startswith("http://localhost"):
        raise ValueError("URL must start with https:// or http://localhost")
    ```
-   Any plain-`http://` Snipe-IT URL (e.g. a Tailscale-internal hostname)
-   breaks every tool that goes through that client. `manage_status_labels`
-   happens to bypass the client and works fine — so tools fail inconsistently,
-   which can mislead Claude into inventing explanations ("the MCP server only
-   allows HTTPS"). Our Dockerfile rewrites `"http://localhost"` →
-   `"http://"` in `client.py` at build time, accepting any HTTP URL.
+   Our Dockerfile rewrites `"http://localhost"` → `"http://"` in
+   `client.py` at build time, accepting any HTTP URL. Without this, tools
+   fail inconsistently (some bypass the client and work, some don't), and
+   Claude tends to invent plausible-sounding explanations about it.
+
+### `webui/Dockerfile` (3 fixes)
+
+1. **Pin a specific release and download the prebuilt binary.** `npm
+   install -g claude-code-webui` is advertised but unreliable; the GitHub
+   release ships Deno-compiled standalone binaries. Pick
+   `claude-code-webui-linux-x64` or `-linux-arm64` via `WEBUI_ARCH`.
+
+2. **Pass `--claude-path /usr/local/bin/claude` at startup.** webui's own
+   PATH-based detection finds the CLI, but the embedded
+   `@anthropic-ai/claude-code` SDK spawns it separately and fails with
+   `ENOENT` unless the path is explicit.
+
+3. **Symlink `node` into `/usr/bin`.** The SDK spawns `claude` (which has
+   an `#!/usr/bin/env node` shebang) with a restricted PATH that doesn't
+   include `/usr/local/bin`, so `env node` can't find the interpreter.
+   Adding `/usr/bin/node → /usr/local/bin/node` makes the shebang resolve
+   regardless of child env.
+
+## `docker-compose.yml` quirks worth knowing
+
+- **Bind-mount `~/.claude.json` as a file, not a dir.** webui reads this
+  file directly. If the in-container target doesn't exist, Docker
+  auto-creates a *directory* at that path and webui crashes with `EISDIR`.
+  Our Dockerfile pre-creates an empty file; the compose mount then
+  attaches to the file target.
+- **Use absolute paths, not `${HOME}`.** snap-installed Docker resolves
+  `${HOME}` to its private snap home (`/home/<user>/snap/docker/<rev>`),
+  not the shell user's home. Anything using `${HOME}` will point at the
+  wrong path or 404.
+- **Mount the whole host home (`/home/admi:/home/admi`).** webui opens
+  sessions at arbitrary working directories — the ones already in your
+  host `~/.claude/projects/*.jsonl`. If the requested cwd doesn't exist
+  inside the container, `claude` fails with a misleading `spawnSync ...
+  ENOENT` (the *cwd* is missing, not the binary). Mounting your home
+  path-exact avoids a long list of per-project bind mounts.
 
 ## Prerequisites
 
-- Raspberry Pi running Coolify, or any Linux host with Docker + Docker Compose.
-- Existing Snipe-IT instance reachable on the same Docker network (or via
-  Tailscale). Get a permanent API token from its web UI → your profile →
-  *Manage API Tokens*.
-- Tailscale installed on the host and on your phone.
-- A **Claude Pro/Max subscription** on the host: run `claude login` once
-  (install the CLI from https://docs.anthropic.com/en/docs/claude-code if
-  you don't have it). The resulting `~/.claude/.credentials.json` is what
-  the container bind-mounts.
-  (API-key mode also works — see below.)
+- Linux host with Docker + Docker Compose. For snap Docker, your user
+  needs to be in the `docker` group:
+  ```sh
+  sudo groupadd -f docker && sudo usermod -aG docker $USER \
+    && sudo snap disable docker && sudo snap enable docker && newgrp docker
+  ```
+- Existing Snipe-IT instance reachable from the host. Get a permanent API
+  token via its web UI → your profile → *Manage API Tokens*.
+- Tailscale on the host and on your phone.
+- A **Claude Pro/Max subscription**: run `claude login` once on the host
+  (install from https://docs.anthropic.com/en/docs/claude-code), then:
+  ```sh
+  claude mcp add --transport http snipeit http://127.0.0.1:8765/mcp/
+  ```
+  API-key mode also works — see *Auth modes* below.
 
 ## Setup
 
-### 1. Copy and fill `.env`
+### 1. Configure `.env`
 
 ```sh
 cp .env.example .env
 $EDITOR .env
 ```
 
-Fields:
-
 | Variable | What |
 |---|---|
-| `SNIPEIT_URL` | Docker-internal Snipe-IT URL (e.g. `http://snipe-it:80`) or Tailscale hostname — not the public one. |
+| `SNIPEIT_URL` | Snipe-IT base URL the MCP container will reach. Any `http://` or `https://` URL works (patch #3 above). |
 | `SNIPEIT_TOKEN` | Snipe-IT API token. |
-| `SNIPEIT_ALLOWED_TOOLS` | Comma-separated MCP tool whitelist (defaults to a safe curated set — see `.env.example`). |
-| `CLAUDE_HOST_DIR` | Host path holding a `claude login`-authenticated `~/.claude`. Default `${HOME}/.claude`. |
+| `SNIPEIT_ALLOWED_TOOLS` | MCP tool whitelist. Default in `.env.example` is a curated read/write set without destructive admin ops. |
+| `CLAUDE_HOST_DIR` | Host path of the `claude login`-authenticated `~/.claude`. Uncomment and set to an absolute path if `${HOME}` won't resolve correctly (snap Docker, Coolify). |
 
-### 2. Attach Snipe-IT to this stack's network (Coolify only)
+### 2. Pick the right webui architecture
 
-The MCP container reaches Snipe-IT by Docker DNS. In Coolify:
-**Snipe-IT project → Networks → add `snipeit-chat-stack_internal`.**
-Without this, the MCP container can't resolve the Snipe-IT service name.
+In `webui/Dockerfile` the default is `WEBUI_ARCH=linux-x64`. On a Raspberry
+Pi 4/5, change it to `linux-arm64` (or override at build time with
+`--build-arg WEBUI_ARCH=linux-arm64`).
 
 ### 3. Deploy
 
@@ -93,40 +134,30 @@ Without this, the MCP container can't resolve the Snipe-IT service name.
 docker compose up -d --build
 ```
 
-First build takes ~5 min on a Pi 4 (`npm install` for CloudCLI dominates).
+### 4. Bind port 8080 to Tailscale only
 
-### 4. Bind the CloudCLI port to Tailscale only
-
-CloudCLI publishes port 3001. In Coolify: leave the service with no public
-domain / no Cloudflare tunnel. On the host:
+`webui` uses `network_mode: host`, so `:8080` binds on every interface
+including `tailscale0`. Block it on everything else:
 
 ```sh
-sudo ufw allow in on tailscale0 to any port 3001
-sudo ufw deny in to any port 3001
+sudo ufw allow in on tailscale0 to any port 8080
+sudo ufw deny in to any port 8080
 ```
-
-Or have Coolify bind it to the `tailscale0` interface.
 
 ### 5. Open from your phone
 
-On the tailnet, visit `http://<host-tailscale-name>:3001/`. Add it to your
-home screen.
-
-The pre-configured project `snipeit-inventory` has a `CLAUDE.md` with the
-inventory workflow baked in — open it in CloudCLI and start chatting.
+Visit `http://<host-tailscale-name>:8080/`. Add to home screen. In the UI,
+pick a working directory (e.g. `/home/<you>/snipeit-inventory` for the
+pre-configured Snipe-IT prompt) and start chatting.
 
 ## Auth modes
 
-**Subscription (default).** `claude login` on the host, nothing else needed.
-Rate limits are tuned for interactive use — fine for ad-hoc photos from your
-phone, not for bulk imports.
-
-**API key.** Put `ANTHROPIC_API_KEY=sk-ant-...` in `.env` and set
-`AUTH_MODE=api_key` (see `.env.example`). Pay-per-token billing.
+- **Subscription (default).** `claude login` on the host, nothing else
+  required. Rate-limits tuned for interactive use — fine for ad-hoc photos
+  from your phone, not for bulk imports.
+- **API key.** Put `ANTHROPIC_API_KEY=sk-ant-...` in `.env`. Pay-per-token.
 
 ## Verification
-
-After `docker compose up -d --build`:
 
 ```sh
 # 1. MCP server alive
@@ -144,41 +175,51 @@ print(urllib.request.urlopen(req, timeout=10).status)
 "
 # Expect 200
 
-# 3. CloudCLI alive
-curl -sI http://127.0.0.1:3001/ | head -1
-# Expect HTTP 200
+# 3. webui alive
+curl -sI http://127.0.0.1:8080/ | head -1
+# Expect HTTP/1.1 200 OK
 
-# 4. Open the UI, open the snipeit-inventory project, ask "list categories"
-#    Expect a mcp__snipeit__manage_categories tool-use step with real data.
+# 4. End-to-end: open the UI, ask "list categories".
+#    Expect a mcp__snipeit__manage_categories tool call with real data.
 ```
 
 ## Troubleshooting
 
-**"URL must start with https:// or http://localhost"** on some tool calls
-but not others — the URL patch (bug #3 above) didn't take effect. Rebuild
-the MCP image: `docker compose build --no-cache snipeit-mcp`.
+**`webui` logs show `spawnSync /usr/local/bin/claude ENOENT` when you send
+a message.** Despite the path, this almost always means the *working
+directory* you picked in the UI doesn't exist inside the container. Mount
+the cwd path-exact (see "Mount the whole host home" above).
 
-**CloudCLI says "Still connecting..."** repeatedly — the MCP HTTP session
-dropped. Restart the MCP service: `docker compose restart snipeit-mcp`.
-The Streamable-HTTP transport is new; transient reconnects happen.
+**URL validation errors on some tools but not others.** The MCP client
+patch (bug #3) didn't take effect — rebuild with `docker compose build
+--no-cache snipeit-mcp`.
 
-**CloudCLI says "Not logged in / please run /login"** — the `~/.claude`
-mount is empty or permission-blocked. Common causes:
-- Host used `sudo` for `docker compose up`, which resets `$HOME` to `/root`;
-  the bind points at `/root/.claude` which doesn't exist. Set
-  `CLAUDE_HOST_DIR=/home/<youruser>/.claude` in `.env` so it's absolute.
-- Container UID doesn't match host UID-1000. Our Dockerfile pins UID 1000.
-  On a Pi, check `id -u` for the user who ran `claude login`.
-- `~/.claude/.credentials.json` is mode 600 owned by the wrong user.
+**webui says "Still connecting..." repeatedly.** The MCP Streamable-HTTP
+session dropped. `docker compose restart snipeit-mcp`.
 
-**Claude invents error messages that don't match reality** — especially
+**webui says "Not logged in / please run /login".** `~/.claude` mount is
+empty or permission-blocked. Common causes:
+- You ran `docker compose` under `sudo`, which reset `$HOME` to `/root`.
+  Set `CLAUDE_HOST_DIR=/home/<you>/.claude` in `.env`.
+- You're on snap Docker and `${HOME}` resolved to the snap's private home
+  — use an absolute path in `CLAUDE_HOST_DIR`.
+- Container UID ≠ 1000, so bind-mounted credentials are unreadable. The
+  webui image uses the stock node:22-slim `node` user (UID 1000); check
+  your host `id -u` matches.
+
+**Host group change doesn't propagate to an already-running shell.** After
+`newgrp docker`, only that shell sees the new group. For any long-lived
+process (IDE, Claude Code, etc.), exit and relaunch from a shell where
+`id` shows `docker`, or log out and back in.
+
+**Claude invents error messages that don't match reality.** Especially
 plausible-sounding ones like "the MCP only allows HTTPS" or "status label
-not found." Always look at the **raw tool result**, not Claude's narration.
-If the raw result is `{"success": true, ...}`, the tool worked and Claude
-is confabulating.
+not found." Always look at the **raw tool result**, not Claude's
+narration. If the raw result is `{"success": true, ...}`, the tool worked
+and Claude is confabulating.
 
-**`status_summary` returns `{"status":"error","messages":"Statuslabel not found"}`**
-— upstream bug in the MCP, unrelated to your Snipe-IT data. Ignore.
+**`status_summary` returns `"Statuslabel not found"`.** Upstream MCP bug
+unrelated to your Snipe-IT data. Ignore.
 
 ## Layout
 
@@ -188,11 +229,12 @@ snipeit-chat-stack/
 ├── .env.example
 ├── README.md
 ├── mcp/
-│   └── Dockerfile           # wraps jameshgordy/snipeit-mcp + 3 patches
-└── cloudcli/
-    ├── Dockerfile           # runs siteboon/claudecodeui
-    └── claude.md            # baked-in system prompt for the inventory project
+│   └── Dockerfile       # jameshgordy/snipeit-mcp + 3 patches
+└── webui/
+    └── Dockerfile       # sugyan/claude-code-webui release binary
+                         #   + @anthropic-ai/claude-code CLI
+                         #   + 3 patches for SDK spawn quirks
 ```
 
-Both containers build from source — no vendored forks. Upstream fixes land
-on your next `docker compose build --no-cache`.
+Both images build from source / upstream releases — no vendored forks.
+Upstream fixes land on your next `docker compose build --no-cache`.
