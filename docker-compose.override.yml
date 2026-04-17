@@ -1,0 +1,8 @@
+# Local-dev overrides. `docker compose` CLI auto-merges this on top of
+# docker-compose.yml; Coolify only ships the base file, so it never
+# sees these `build:` stanzas and keeps pulling from ghcr.
+services:
+  snipeit-mcp:
+    build: ./mcp
+  webui:
+    build: ./webui

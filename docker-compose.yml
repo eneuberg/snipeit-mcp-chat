@@ -1,9 +1,8 @@
 services:
   snipeit-mcp:
-    # `build` + `image`: locally `docker compose build` uses the Dockerfile
-    # and tags with the image name; on Coolify / prod, if the image already
-    # exists in the registry, compose pulls it and skips the build.
-    build: ./mcp
+    # Coolify pulls this from ghcr. For local dev, `build: ./mcp` lives
+    # in docker-compose.override.yml (auto-merged by the docker compose
+    # CLI, not deployed by Coolify) so `docker compose build` works.
     image: ghcr.io/eneuberg/snipeit-mcp-chat/snipeit-mcp:latest
     environment:
       SNIPEIT_URL: '${SNIPEIT_URL}'
@@ -16,7 +15,8 @@ services:
     restart: unless-stopped
 
   webui:
-    build: ./webui
+    # See `snipeit-mcp` note — `build:` for local dev is in
+    # docker-compose.override.yml.
     image: ghcr.io/eneuberg/snipeit-mcp-chat/webui:latest
     environment:
       # Port the proxy listens on inside the container. Coolify maps this
