@@ -37,9 +37,12 @@ services:
       # isolated from the host.
       - webui_workspace:/workspace
       # Read-only seed mounts, consulted only on first boot by the
-      # entrypoint to populate the named volume above.
-      - /home/admi/.claude:/seed/claude:ro
-      - /home/admi/.claude.json:/seed/claude.json:ro
+      # entrypoint to populate the named volume above. Default to the
+      # invoking user's ~/.claude; override via .env for snap Docker or
+      # other setups where ${HOME} doesn't resolve to the shell user's
+      # home.
+      - ${CLAUDE_HOST_DIR:-${HOME}/.claude}:/seed/claude:ro
+      - ${CLAUDE_CONFIG_FILE:-${HOME}/.claude.json}:/seed/claude.json:ro
     depends_on:
       - snipeit-mcp
     restart: unless-stopped

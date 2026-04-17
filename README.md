@@ -60,8 +60,11 @@ first build, and the container inherits it.
 
 1. **Pin a specific release and download the prebuilt binary.** `npm
    install -g claude-code-webui` is advertised but unreliable; the GitHub
-   release ships Deno-compiled standalone binaries. Pick
-   `claude-code-webui-linux-x64` or `-linux-arm64` via `WEBUI_ARCH`.
+   release ships Deno-compiled standalone binaries. We pick between
+   `claude-code-webui-linux-x64` and `-linux-arm64` automatically from
+   BuildKit's `TARGETARCH` (falls back to `dpkg --print-architecture`
+   for non-buildx builds), so the same Dockerfile works on x86_64 and
+   on Raspberry Pi 4/5 without editing anything.
 
 2. **Pass `--claude-path /usr/local/bin/claude` at startup.** webui's own
    PATH-based detection finds the CLI, but the embedded
@@ -99,10 +102,12 @@ first build, and the container inherits it.
   independently afterward), MCP config, and session history.
 - **`webui_workspace:/workspace`** — scratch filesystem chat sessions
   write to. Survives container restarts.
-- **`/home/admi/.claude:/seed/claude:ro`** and
-  **`/home/admi/.claude.json:/seed/claude.json:ro`** — read-only seed
-  mounts. The entrypoint (`webui/entrypoint.sh`) reads from these *only*
-  on first boot to populate `webui_home`. Never written to.
+- **`${CLAUDE_HOST_DIR:-${HOME}/.claude}:/seed/claude:ro`** and
+  **`${CLAUDE_CONFIG_FILE:-${HOME}/.claude.json}:/seed/claude.json:ro`**
+  — read-only seed mounts. The entrypoint (`webui/entrypoint.sh`) reads
+  from these *only* on first boot to populate `webui_home`. Never
+  written to. Both default to the invoking shell's `${HOME}`; override
+  in `.env` if that's wrong for your setup (snap Docker, Coolify, sudo).
 
 The host home is otherwise not visible inside the container. Use
 `/workspace` as the working directory when starting a new chat in the UI.
@@ -115,12 +120,13 @@ The host home is otherwise not visible inside the container. Use
 - **Read-only seed.** Even if webui were compromised, it can't modify
   your real credentials or MCP config.
 - **jq filter on `.claude.json` seed.** Only the `mcpServers` key is
-  copied; the host `projects` list is dropped so paths like
-  `/home/admi/a` don't appear as dead links.
-- **Use absolute paths in compose, not `${HOME}`.** Snap-installed Docker
+  copied; the host `projects` list is dropped so host paths don't
+  appear as dead links inside the container.
+- **`${HOME}` defaults with `.env` override.** Snap-installed Docker
   resolves `${HOME}` to its private snap home
-  (`/home/<user>/snap/docker/<rev>`), not the shell user's home —
-  anything using `${HOME}` mounts the wrong path.
+  (`/home/<user>/snap/docker/<rev>`), not the shell user's home. If
+  that's you, set `CLAUDE_HOST_DIR` and `CLAUDE_CONFIG_FILE` to
+  absolute paths in `.env`.
 
 ## Prerequisites
 
@@ -154,21 +160,16 @@ $EDITOR .env
 | `SNIPEIT_URL` | Snipe-IT base URL the MCP container will reach. Any `http://` or `https://` URL works (patch #3 above). |
 | `SNIPEIT_TOKEN` | Snipe-IT API token. |
 | `SNIPEIT_ALLOWED_TOOLS` | MCP tool whitelist. Default in `.env.example` is a curated read/write set without destructive admin ops. |
-| `CLAUDE_HOST_DIR` | Host path of the `claude login`-authenticated `~/.claude`. Uncomment and set to an absolute path if `${HOME}` won't resolve correctly (snap Docker, Coolify). |
+| `CLAUDE_HOST_DIR` | Host path of the `claude login`-authenticated `~/.claude`. Defaults to `${HOME}/.claude`; override only if `${HOME}` won't resolve correctly (snap Docker, Coolify). |
+| `CLAUDE_CONFIG_FILE` | Host path of `~/.claude.json`. Defaults to `${HOME}/.claude.json`. Same override rule. |
 
-### 2. Pick the right webui architecture
-
-In `webui/Dockerfile` the default is `WEBUI_ARCH=linux-x64`. On a Raspberry
-Pi 4/5, change it to `linux-arm64` (or override at build time with
-`--build-arg WEBUI_ARCH=linux-arm64`).
-
-### 3. Deploy
+### 2. Deploy
 
 ```sh
 docker compose up -d --build
 ```
 
-### 4. Bind port 8080 to Tailscale only
+### 3. Bind port 8080 to Tailscale only
 
 `webui` uses `network_mode: host`, so `:8080` binds on every interface
 including `tailscale0`. Block it on everything else:
@@ -178,7 +179,7 @@ sudo ufw allow in on tailscale0 to any port 8080
 sudo ufw deny in to any port 8080
 ```
 
-### 5. Open from your phone
+### 4. Open from your phone
 
 Visit `http://<host-tailscale-name>:8080/`. Add to home screen. In the UI,
 start a new chat with `/workspace` as the working directory (it's the
@@ -252,7 +253,7 @@ curl -sI http://127.0.0.1:8080/ | head -1
 **`webui` logs show `spawnSync /usr/local/bin/claude ENOENT` when you send
 a message.** Misleading error: the *working directory* you picked in the
 UI doesn't exist inside the container. Only `/workspace` is writable;
-host paths like `/home/admi/anything` won't resolve.
+host paths from outside the container won't resolve.
 
 **URL validation errors on some tools but not others.** The MCP client
 patch (bug #3) didn't take effect — rebuild with `docker compose build

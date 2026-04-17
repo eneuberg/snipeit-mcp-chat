@@ -1,14 +1,23 @@
 FROM node:22-slim
 
 ARG WEBUI_VERSION=0.1.56
-# linux-x64 or linux-arm64 depending on the host (Pi 4/5 uses arm64).
-ARG WEBUI_ARCH=linux-x64
+# TARGETARCH is auto-provided by BuildKit/buildx (amd64 on x86_64, arm64
+# on Raspberry Pi 4/5 64-bit). Fall back to the host's dpkg arch for
+# plain `docker build` without BuildKit. Upstream releases two binaries:
+# claude-code-webui-linux-x64 and claude-code-webui-linux-arm64.
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl jq tini \
     && rm -rf /var/lib/apt/lists/* \
+    && arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "$arch" in \
+         amd64) webui_arch=linux-x64 ;; \
+         arm64) webui_arch=linux-arm64 ;; \
+         *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+       esac \
     && curl -fsSL -o /usr/local/bin/claude-code-webui \
-         https://github.com/sugyan/claude-code-webui/releases/download/${WEBUI_VERSION}/claude-code-webui-${WEBUI_ARCH} \
+         "https://github.com/sugyan/claude-code-webui/releases/download/${WEBUI_VERSION}/claude-code-webui-${webui_arch}" \
     && chmod +x /usr/local/bin/claude-code-webui \
     && npm install -g @anthropic-ai/claude-code
 
