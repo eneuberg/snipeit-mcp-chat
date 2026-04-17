@@ -1,48 +1,25 @@
 services:
   snipeit-mcp:
-    # Local Dockerfile wraps upstream with two fixes: pin fastmcp==2.12.4
-    # (upstream's server.py uses internal API that newer fastmcp removed) and
-    # launch over HTTP. See mcp/Dockerfile for details.
-    build: ./mcp
+    image: ghcr.io/eneuberg/snipeit-mcp-chat/snipeit-mcp:latest
     environment:
-      SNIPEIT_URL: ${SNIPEIT_URL}
-      SNIPEIT_TOKEN: ${SNIPEIT_TOKEN}
-      SNIPEIT_ALLOWED_TOOLS: ${SNIPEIT_ALLOWED_TOOLS}
+      SNIPEIT_URL: '${SNIPEIT_URL}'
+      SNIPEIT_TOKEN: '${SNIPEIT_TOKEN}'
+      SNIPEIT_ALLOWED_TOOLS: '${SNIPEIT_ALLOWED_TOOLS}'
     ports:
-      # Loopback-only: the webui container (network_mode: host) reaches MCP
-      # at http://127.0.0.1:8765/mcp/ — same URL the host's ~/.claude.json
-      # already has baked in. Not exposed on the tailnet.
-      - "127.0.0.1:8765:8000"
+      - '127.0.0.1:8765:8000'
     restart: unless-stopped
 
   webui:
-    # sugyan/claude-code-webui — mobile-friendly chat UI. Shells out to the
-    # `claude` CLI (bundled in the image). On first boot the entrypoint
-    # seeds its own ~/.claude from the read-only /seed bind-mounts of the
-    # host's Claude config; after that it owns its state entirely.
-    build: ./webui
-    # Host networking so http://127.0.0.1:8765/mcp/ in the seeded
-    # .claude.json resolves identically inside the container, and so port
-    # 8080 binds on all host interfaces (incl. tailscale0) for phone access.
+    image: ghcr.io/eneuberg/snipeit-mcp-chat/webui:latest
     network_mode: host
     environment:
       PORT: 8080
       HOST: 0.0.0.0
     volumes:
-      # Persistent container home: OAuth creds (copy of host's at first
-      # boot, refreshed independently afterwards), MCP config, session
-      # history. Everything the container writes lives here.
       - webui_home:/home/node
-      # Container-local scratch filesystem for chat sessions to work in —
-      # isolated from the host.
       - webui_workspace:/workspace
-      # Read-only seed mounts, consulted only on first boot by the
-      # entrypoint to populate the named volume above. Default to the
-      # invoking user's ~/.claude; override via .env for snap Docker or
-      # other setups where ${HOME} doesn't resolve to the shell user's
-      # home.
-      - ${CLAUDE_HOST_DIR:-${HOME}/.claude}:/seed/claude:ro
-      - ${CLAUDE_CONFIG_FILE:-${HOME}/.claude.json}:/seed/claude.json:ro
+      - '${CLAUDE_HOST_DIR}:/seed/claude:ro'
+      - '${CLAUDE_CONFIG_FILE}:/seed/claude.json:ro'
     depends_on:
       - snipeit-mcp
     restart: unless-stopped
