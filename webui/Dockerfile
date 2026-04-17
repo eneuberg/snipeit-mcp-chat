@@ -16,6 +16,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # into the container's named-volume home on first start only.
 COPY --chmod=755 entrypoint.sh /usr/local/bin/webui-entrypoint
 
+# HTML-injection proxy that adds an "Add project" button to the upstream
+# UI and exposes /_ext/add-project for registering new project paths.
+# Runs in front of claude-code-webui (which it spawns internally on
+# 127.0.0.1:8079).
+COPY --chmod=644 proxy.js /usr/local/bin/webui-proxy.js
+
 # The `claude` binary installed via npm uses `#!/usr/bin/env node`. The
 # Deno-bundled SDK inside webui spawns claude with a restricted PATH that
 # doesn't include /usr/local/bin, so `env node` can't find the interpreter
@@ -38,8 +44,6 @@ ENV PORT=8080 HOST=0.0.0.0
 
 EXPOSE 8080
 ENTRYPOINT ["tini", "--", "webui-entrypoint"]
-# --claude-path is required: webui's own PATH-based detection finds the
-# CLI, but the embedded @anthropic-ai/claude-code SDK spawns it separately
-# and fails with ENOENT unless the path is explicit.
-CMD ["claude-code-webui", "--host", "0.0.0.0", "--port", "8080", \
-     "--claude-path", "/usr/local/bin/claude"]
+# The proxy binds :8080 and spawns claude-code-webui on 127.0.0.1:8079
+# internally, passing --claude-path so the SDK spawn doesn't ENOENT.
+CMD ["node", "/usr/local/bin/webui-proxy.js"]

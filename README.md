@@ -56,7 +56,7 @@ first build, and the container inherits it.
    fail inconsistently (some bypass the client and work, some don't), and
    Claude tends to invent plausible-sounding explanations about it.
 
-### `webui/Dockerfile` (3 fixes)
+### `webui/Dockerfile` (3 fixes + 1 feature)
 
 1. **Pin a specific release and download the prebuilt binary.** `npm
    install -g claude-code-webui` is advertised but unreliable; the GitHub
@@ -73,6 +73,24 @@ first build, and the container inherits it.
    include `/usr/local/bin`, so `env node` can't find the interpreter.
    Adding `/usr/bin/node → /usr/local/bin/node` makes the shebang resolve
    regardless of child env.
+
+4. **Ship `proxy.js` as the container CMD.** webui has no "Add project"
+   UI and its `/api/projects` endpoint requires an entry both in
+   `~/.claude.json` and as an encoded dir under `~/.claude/projects/`.
+   Our `webui/proxy.js` is a ~150-line Node script that binds `:8080`,
+   spawns `claude-code-webui` internally on `127.0.0.1:8079`, forwards
+   all traffic, and:
+   - Injects a `<script src="/_ext/inject.js">` tag into the HTML
+     response for `/`. The script uses a MutationObserver to find the
+     existing "Open settings" button and insert a matching `+` button
+     next to it.
+   - Serves `POST /_ext/add-project` which validates the path, edits
+     `~/.claude.json` (`projects[path] = {}`), creates the encoded
+     `~/.claude/projects/<encoded>/` dir, and `mkdir -p`s the path
+     itself so chat sessions can `cd` into it without ENOENT.
+
+   No upstream fork — delete `proxy.js` and revert the `CMD` line to
+   fall back to plain upstream behaviour.
 
 ## Volume layout
 
@@ -166,6 +184,12 @@ Visit `http://<host-tailscale-name>:8080/`. Add to home screen. In the UI,
 start a new chat with `/workspace` as the working directory (it's the
 only one the container can write to). Host paths are intentionally not
 mounted.
+
+To add more working directories, use the `+` button in the UI header
+(next to the gear icon) and enter an absolute path, e.g.
+`/workspace/inventory`. The button is provided by `webui/proxy.js` — it
+writes to `~/.claude.json`, creates the encoded project dir, and
+`mkdir -p`s the path so the session can open it immediately.
 
 ### Re-seed after changing host MCP config
 
@@ -274,8 +298,10 @@ snipeit-chat-stack/
     ├── Dockerfile       # sugyan/claude-code-webui release binary
     │                    #   + @anthropic-ai/claude-code CLI
     │                    #   + 3 patches for SDK spawn quirks
-    └── entrypoint.sh    # first-boot seed of OAuth + MCP config from
-                         #   read-only /seed bind-mounts
+    ├── entrypoint.sh    # first-boot seed of OAuth + MCP config from
+    │                    #   read-only /seed bind-mounts
+    └── proxy.js         # injects an "Add project" button into the UI
+                         #   and exposes /_ext/add-project
 ```
 
 Both images build from source / upstream releases — no vendored forks.
