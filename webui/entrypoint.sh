@@ -3,18 +3,36 @@ set -e
 
 CLAUDE_DIR=/home/node/.claude
 CLAUDE_JSON=/home/node/.claude.json
+SEED_CLAUDE_DIR=/seed/claude
+SEED_CLAUDE_JSON=/seed/claude.json
 
 # First-boot seed only. Copies OAuth creds + MCP config from the host
 # read-only mounts into the container's named-volume home. Never
 # overwrites existing container state, so refreshed tokens and session
 # history persist across restarts.
-if [ ! -f "$CLAUDE_DIR/.credentials.json" ] && [ -f /seed/claude/.credentials.json ]; then
+#
+# Fail-closed: if the named volume is empty AND the host seed is
+# missing, exit 1 instead of booting a broken container (webui's
+# /api/projects 500s loudly in that state, which is hard to diagnose).
+if [ -f "$CLAUDE_JSON" ]; then
+    echo "[entrypoint] $CLAUDE_JSON already present — using forked state in the named volume. Wipe webui_home to re-seed from the host."
+else
+    if [ ! -f "$SEED_CLAUDE_JSON" ]; then
+        echo "[entrypoint] FATAL: seed file $SEED_CLAUDE_JSON is missing." >&2
+        echo "[entrypoint]   -> set CLAUDE_CONFIG_FILE to point at your host's .claude.json" >&2
+        echo "[entrypoint]      (run 'claude login' first if you haven't)." >&2
+        exit 1
+    fi
+    if [ ! -f "$SEED_CLAUDE_DIR/.credentials.json" ]; then
+        echo "[entrypoint] FATAL: seed file $SEED_CLAUDE_DIR/.credentials.json is missing." >&2
+        echo "[entrypoint]   -> set CLAUDE_HOST_DIR to point at your host's .claude directory." >&2
+        exit 1
+    fi
+    echo "[entrypoint] seeding $CLAUDE_DIR + $CLAUDE_JSON from $SEED_CLAUDE_DIR / $SEED_CLAUDE_JSON"
     mkdir -p "$CLAUDE_DIR"
-    cp /seed/claude/.credentials.json "$CLAUDE_DIR/.credentials.json"
+    cp "$SEED_CLAUDE_DIR/.credentials.json" "$CLAUDE_DIR/.credentials.json"
     chmod 600 "$CLAUDE_DIR/.credentials.json"
-fi
 
-if [ ! -f "$CLAUDE_JSON" ] && [ -f /seed/claude.json ]; then
     # Keep only MCP servers; seed a single /workspace project so the UI
     # has something to open on first boot. Drop host projects to avoid
     # dead-link entries pointing at paths that don't exist in-container.
@@ -27,7 +45,7 @@ if [ ! -f "$CLAUDE_JSON" ] && [ -f /seed/claude.json ]; then
             | if has("snipeit") then .snipeit.url = $mcp_url else . end
         ),
         projects: {"/workspace": {}}
-    }' /seed/claude.json > "$CLAUDE_JSON"
+    }' "$SEED_CLAUDE_JSON" > "$CLAUDE_JSON"
     chmod 600 "$CLAUDE_JSON"
 fi
 
