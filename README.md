@@ -192,11 +192,27 @@ To add more working directories, use the `+` button in the UI header
 writes to `~/.claude.json`, creates the encoded project dir, and
 `mkdir -p`s the path so the session can open it immediately.
 
-### Re-seed after changing host MCP config
+To attach a photo, use the paperclip button inside the chat input. On
+mobile it opens the camera directly; on desktop it opens the file
+picker. The image is uploaded to `/workspace/_uploads/` and its
+absolute path is appended to your message — Claude reads it via its
+`Read` tool. Prune with
+`docker compose exec webui rm -rf /workspace/_uploads/*`.
 
-Changes made on the host via `claude mcp add` only touch host state, not
-the container. To pull an updated MCP list into the container:
+## Cheat sheet
 
+Everyday ops — all run from the repo root on the Docker host.
+
+**Full re-seed of Claude state** (after `claude login` or when tokens
+look stale — wipes credentials, MCP config, session history; keeps
+`/workspace`):
+```sh
+docker compose down
+docker volume rm snipeit-chat-stack_webui_home
+docker compose up -d
+```
+
+**Pull in just updated MCP servers** (after `claude mcp add` on host):
 ```sh
 docker compose exec webui sh -c \
   'jq --argjson h "$(jq .mcpServers /seed/claude.json)" \
@@ -205,15 +221,64 @@ docker compose exec webui sh -c \
 docker compose restart webui
 ```
 
-To re-seed everything (e.g. after `claude login` on the host):
-
+**Restart / rebuild**:
 ```sh
-docker compose down
-docker volume rm snipeit-chat-stack_webui_home
-docker compose up -d
+docker compose restart webui                 # just bounce
+docker compose up -d --build webui           # rebuild image + restart
+docker compose up -d --build --force-recreate  # full rebuild both services
 ```
 
-`webui_workspace` is preserved — only the Claude state gets reset.
+**Logs**:
+```sh
+docker compose logs -f webui --tail=50       # follow
+docker compose logs snipeit-mcp --tail=50    # MCP server
+```
+
+**Shell into the container**:
+```sh
+docker compose exec webui bash
+docker compose exec snipeit-mcp bash
+```
+
+**Inspect / edit Claude state live**:
+```sh
+docker compose exec webui jq .mcpServers /home/node/.claude.json
+docker compose exec webui jq '.projects | keys' /home/node/.claude.json
+```
+
+**Projects** — remove one:
+```sh
+docker compose exec webui sh -c \
+  'jq "del(.projects[\"/workspace/NAME\"])" /home/node/.claude.json > /tmp/j && \
+   mv /tmp/j /home/node/.claude.json && \
+   rm -rf /home/node/.claude/projects/-workspace-NAME'
+```
+
+**Prune uploaded photos**:
+```sh
+docker compose exec webui rm -rf /workspace/_uploads/*
+```
+
+**Nuclear wipe** (everything including `/workspace` contents — photos,
+project files, chat history):
+```sh
+docker compose down -v
+docker compose up -d --build
+```
+
+**Host `claude` sanity-check** (confirms your host login works before
+re-seeding the container):
+```sh
+claude --version
+claude mcp list
+ls -la ~/.claude/.credentials.json ~/.claude.json
+```
+
+If after a re-seed the UI still says "Not logged in", the problem is on
+the host side — the read-only seed mounts in `docker-compose.yml` point
+at paths that don't contain a fresh `.credentials.json`. Check `$HOME`
+in the shell you ran `docker compose` in, and override
+`CLAUDE_HOST_DIR` / `CLAUDE_CONFIG_FILE` in `.env` if needed.
 
 ## Auth modes
 
