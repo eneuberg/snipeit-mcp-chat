@@ -46,6 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Coolify redeploy
+        if: ${{ secrets.COOLIFY_WEBHOOK != '' }}
         run: |
           curl --fail --request GET "${{ secrets.COOLIFY_WEBHOOK }}" \
             --header "Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}"
