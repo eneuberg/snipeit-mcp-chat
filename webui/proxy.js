@@ -14,7 +14,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 const UPSTREAM_PORT = 8079;
-const LISTEN_PORT = Number(process.env.PORT || 8080);
+const LISTEN_PORT = Number(process.env.PORT || 3583);
 const LISTEN_HOST = process.env.HOST || "0.0.0.0";
 const HOME = process.env.HOME;
 const CLAUDE_JSON = `${HOME}/.claude.json`;
