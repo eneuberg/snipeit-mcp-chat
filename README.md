@@ -24,10 +24,14 @@ Two containers:
   so the loopback MCP URL resolves identically in-container and the UI is
   reachable on the tailnet interface.
 
-Configuration (OAuth session, MCP servers, project history) lives on the
-host in `~/.claude/` + `~/.claude.json` and is bind-mounted into the webui
-container read-write. Configure once with `claude login` / `claude mcp
-add`, and it persists across rebuilds until you delete it.
+The host's `~/.claude/` + `~/.claude.json` are bind-mounted read-only at
+`/seed/` inside the container. On first boot the entrypoint copies
+OAuth credentials and MCP server configuration into a named Docker volume
+(`webui_home`); from then on the container owns its own state. A second
+named volume (`webui_workspace`, mounted at `/workspace`) is the only
+scratch filesystem chat sessions can write to — the host home is not
+exposed. Configure once with `claude login` / `claude mcp add` before
+first build, and the container inherits it.
 
 ## Upstream bugs we patch
 
@@ -70,23 +74,35 @@ add`, and it persists across rebuilds until you delete it.
    Adding `/usr/bin/node → /usr/local/bin/node` makes the shebang resolve
    regardless of child env.
 
-## `docker-compose.yml` quirks worth knowing
+## Volume layout
 
-- **Bind-mount `~/.claude.json` as a file, not a dir.** webui reads this
-  file directly. If the in-container target doesn't exist, Docker
-  auto-creates a *directory* at that path and webui crashes with `EISDIR`.
-  Our Dockerfile pre-creates an empty file; the compose mount then
-  attaches to the file target.
-- **Use absolute paths, not `${HOME}`.** snap-installed Docker resolves
-  `${HOME}` to its private snap home (`/home/<user>/snap/docker/<rev>`),
-  not the shell user's home. Anything using `${HOME}` will point at the
-  wrong path or 404.
-- **Mount the whole host home (`/home/admi:/home/admi`).** webui opens
-  sessions at arbitrary working directories — the ones already in your
-  host `~/.claude/projects/*.jsonl`. If the requested cwd doesn't exist
-  inside the container, `claude` fails with a misleading `spawnSync ...
-  ENOENT` (the *cwd* is missing, not the binary). Mounting your home
-  path-exact avoids a long list of per-project bind mounts.
+- **`webui_home:/home/node`** — persistent container home. Holds the
+  OAuth credentials (copy of host's at first boot, refreshed
+  independently afterward), MCP config, and session history.
+- **`webui_workspace:/workspace`** — scratch filesystem chat sessions
+  write to. Survives container restarts.
+- **`/home/admi/.claude:/seed/claude:ro`** and
+  **`/home/admi/.claude.json:/seed/claude.json:ro`** — read-only seed
+  mounts. The entrypoint (`webui/entrypoint.sh`) reads from these *only*
+  on first boot to populate `webui_home`. Never written to.
+
+The host home is otherwise not visible inside the container. Use
+`/workspace` as the working directory when starting a new chat in the UI.
+
+### Why this shape
+
+- **Named volume, not bind-mount, for state.** Session history and any
+  refreshed OAuth tokens are isolated from the host — the host's
+  `~/.claude` never changes regardless of what happens in the container.
+- **Read-only seed.** Even if webui were compromised, it can't modify
+  your real credentials or MCP config.
+- **jq filter on `.claude.json` seed.** Only the `mcpServers` key is
+  copied; the host `projects` list is dropped so paths like
+  `/home/admi/a` don't appear as dead links.
+- **Use absolute paths in compose, not `${HOME}`.** Snap-installed Docker
+  resolves `${HOME}` to its private snap home
+  (`/home/<user>/snap/docker/<rev>`), not the shell user's home —
+  anything using `${HOME}` mounts the wrong path.
 
 ## Prerequisites
 
@@ -147,8 +163,32 @@ sudo ufw deny in to any port 8080
 ### 5. Open from your phone
 
 Visit `http://<host-tailscale-name>:8080/`. Add to home screen. In the UI,
-pick a working directory (e.g. `/home/<you>/snipeit-inventory` for the
-pre-configured Snipe-IT prompt) and start chatting.
+start a new chat with `/workspace` as the working directory (it's the
+only one the container can write to). Host paths are intentionally not
+mounted.
+
+### Re-seed after changing host MCP config
+
+Changes made on the host via `claude mcp add` only touch host state, not
+the container. To pull an updated MCP list into the container:
+
+```sh
+docker compose exec webui sh -c \
+  'jq --argjson h "$(jq .mcpServers /seed/claude.json)" \
+      ".mcpServers = \$h" /home/node/.claude.json > /tmp/j && \
+   mv /tmp/j /home/node/.claude.json'
+docker compose restart webui
+```
+
+To re-seed everything (e.g. after `claude login` on the host):
+
+```sh
+docker compose down
+docker volume rm snipeit-chat-stack_webui_home
+docker compose up -d
+```
+
+`webui_workspace` is preserved — only the Claude state gets reset.
 
 ## Auth modes
 
@@ -186,9 +226,9 @@ curl -sI http://127.0.0.1:8080/ | head -1
 ## Troubleshooting
 
 **`webui` logs show `spawnSync /usr/local/bin/claude ENOENT` when you send
-a message.** Despite the path, this almost always means the *working
-directory* you picked in the UI doesn't exist inside the container. Mount
-the cwd path-exact (see "Mount the whole host home" above).
+a message.** Misleading error: the *working directory* you picked in the
+UI doesn't exist inside the container. Only `/workspace` is writable;
+host paths like `/home/admi/anything` won't resolve.
 
 **URL validation errors on some tools but not others.** The MCP client
 patch (bug #3) didn't take effect — rebuild with `docker compose build
@@ -231,9 +271,11 @@ snipeit-chat-stack/
 ├── mcp/
 │   └── Dockerfile       # jameshgordy/snipeit-mcp + 3 patches
 └── webui/
-    └── Dockerfile       # sugyan/claude-code-webui release binary
-                         #   + @anthropic-ai/claude-code CLI
-                         #   + 3 patches for SDK spawn quirks
+    ├── Dockerfile       # sugyan/claude-code-webui release binary
+    │                    #   + @anthropic-ai/claude-code CLI
+    │                    #   + 3 patches for SDK spawn quirks
+    └── entrypoint.sh    # first-boot seed of OAuth + MCP config from
+                         #   read-only /seed bind-mounts
 ```
 
 Both images build from source / upstream releases — no vendored forks.

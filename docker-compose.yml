@@ -17,29 +17,33 @@ services:
 
   webui:
     # sugyan/claude-code-webui — mobile-friendly chat UI. Shells out to the
-    # `claude` CLI (bundled in the image). No built-in auth; reuses the
-    # host's ~/.claude (OAuth + MCP config) via the bind-mount below.
+    # `claude` CLI (bundled in the image). On first boot the entrypoint
+    # seeds its own ~/.claude from the read-only /seed bind-mounts of the
+    # host's Claude config; after that it owns its state entirely.
     build: ./webui
-    # Host networking so http://127.0.0.1:8765/mcp/ in ~/.claude.json
-    # resolves identically inside the container, and so port 8080 binds on
-    # all host interfaces (incl. tailscale0) for phone access.
+    # Host networking so http://127.0.0.1:8765/mcp/ in the seeded
+    # .claude.json resolves identically inside the container, and so port
+    # 8080 binds on all host interfaces (incl. tailscale0) for phone access.
     network_mode: host
     environment:
       PORT: 8080
       HOST: 0.0.0.0
     volumes:
-      - ${CLAUDE_HOST_DIR:-${HOME}/.claude}:/home/node/.claude
-      # webui reads ~/.claude.json (the file, not the dir) for project list
-      # + MCP config. Bind it read-write so webui can update state there.
-      # Absolute path: snap-installed docker resolves ${HOME} to its private
-      # snap home, not the host user's, which breaks the mount.
-      - /home/admi/.claude.json:/home/node/.claude.json
-      # Path-exact mount of the whole host home so every project cwd in
-      # ~/.claude/projects/*.jsonl resolves inside the container. Without
-      # this, claude spawns fail with a misleading "ENOENT" (actually the
-      # cwd missing) whenever you pick a workspace that isn't explicitly
-      # mounted.
-      - /home/admi:/home/admi
+      # Persistent container home: OAuth creds (copy of host's at first
+      # boot, refreshed independently afterwards), MCP config, session
+      # history. Everything the container writes lives here.
+      - webui_home:/home/node
+      # Container-local scratch filesystem for chat sessions to work in —
+      # isolated from the host.
+      - webui_workspace:/workspace
+      # Read-only seed mounts, consulted only on first boot by the
+      # entrypoint to populate the named volume above.
+      - /home/admi/.claude:/seed/claude:ro
+      - /home/admi/.claude.json:/seed/claude.json:ro
     depends_on:
       - snipeit-mcp
     restart: unless-stopped
+
+volumes:
+  webui_home:
+  webui_workspace:
