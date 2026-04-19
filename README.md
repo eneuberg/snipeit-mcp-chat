@@ -139,11 +139,11 @@ The host home is otherwise not visible inside the container. Use
 - Existing Snipe-IT instance reachable from the host. Get a permanent API
   token via its web UI → your profile → *Manage API Tokens*.
 - Tailscale on the host and on your phone.
-- A **Claude Pro/Max subscription**: run `claude login` once on the host
-  (install from https://docs.anthropic.com/en/docs/claude-code), then:
-  ```sh
-  claude mcp add --transport http snipeit http://127.0.0.1:8765/mcp/
-  ```
+- A **Claude Pro/Max subscription**: run `claude login` once on the
+  host (install from https://docs.anthropic.com/en/docs/claude-code).
+  The webui container's entrypoint injects the snipeit MCP server
+  unconditionally on first boot, so you don't need to
+  `claude mcp add` anything on the host.
 
 ## Setup
 
@@ -167,6 +167,42 @@ $EDITOR .env
 ```sh
 docker compose up -d --build
 ```
+
+### 2b. Deploy on Coolify (instead of local `docker compose`)
+
+Coolify has two quirks you need to work around: its compose validator
+rejects `${VAR:-default}` in volume `source:` lines, and it runs
+compose as `root`, so `${HOME}` resolves to `/root` — not the user who
+ran `claude login`.
+
+1. **On the Coolify host**, run `claude login` as the real user (not
+   root). Note the path (`echo ~`) and verify both files exist:
+   ```sh
+   ls -la ~/.claude/.credentials.json ~/.claude.json
+   ```
+2. **Paste `docker-compose.yml` into Coolify's compose editor** with
+   two edits:
+   - Replace the two `/seed/` volume lines with literal host paths
+     (no `${...}` — Coolify will reject them):
+     ```yaml
+     - '/home/YOURUSER/.claude:/seed/claude:ro'
+     - '/home/YOURUSER/.claude.json:/seed/claude.json:ro'
+     ```
+   - Drop the `ports:` block on `webui`. Coolify's Traefik handles
+     routing.
+3. **Set env vars in Coolify's UI**: `SNIPEIT_URL`, `SNIPEIT_TOKEN`,
+   `SNIPEIT_ALLOWED_TOOLS` (copy defaults from `.env.example`).
+   `SNIPEIT_URL` can be either a docker-network URL
+   (`http://snipe-it:80`) if Snipe-IT is in the same compose stack,
+   or a public URL (`https://inventory.example.com`) if it's hosted
+   separately — the MCP container has normal outbound internet.
+4. **Deploy.** If the webui comes up but the snipeit MCP is missing
+   from the tools list, or `/api/projects` returns 500, the seed
+   happened against a stale or broken state — wipe the named volume
+   on the Coolify host and redeploy:
+   ```sh
+   docker volume rm <stack>_webui_home
+   ```
 
 ### 3. Bind port 8080 to Tailscale only
 
@@ -287,6 +323,15 @@ the host side — the read-only seed mounts in `docker-compose.yml` point
 at paths that don't contain a fresh `.credentials.json`. Check `$HOME`
 in the shell you ran `docker compose` in, and override
 `CLAUDE_HOST_DIR` / `CLAUDE_CONFIG_FILE` in `.env` if needed.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `FATAL: seed file /seed/claude.json is missing` in entrypoint logs | Host file at `CLAUDE_CONFIG_FILE` doesn't exist, OR the volume mount was silently dropped (on Coolify, check you replaced every `${...}` in volume sources with literal paths). Bind-mounting a non-existent file creates an empty dir, which also trips this check. |
+| UI loads but the snipeit MCP is missing from the tools list | Stale `webui_home` — the first-boot seed already happened, so later changes to the host config or to the entrypoint don't take effect. Wipe the volume (`docker volume rm <stack>_webui_home`) and redeploy. |
+| UI says "Not logged in" after a fresh seed | Bind-mounted `.credentials.json` is from the wrong user. On Coolify, `${HOME}` resolves to `/root`, not the user you ran `claude login` as — hardcode the real user's home in the compose volume lines. |
+| MCP is registered but tools return connection errors | `snipeit-mcp` can't reach the URL in `SNIPEIT_URL`. Check `docker compose logs snipeit-mcp` and, from inside that container, `curl -I $SNIPEIT_URL/api/v1/statuslabels` with the token. If Snipe-IT is in another compose stack, the two networks aren't connected — either use its public URL or attach both stacks to an external network. |
 
 ## Auth
 

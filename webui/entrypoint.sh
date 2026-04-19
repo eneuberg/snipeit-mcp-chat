@@ -33,16 +33,16 @@ else
     cp "$SEED_CLAUDE_DIR/.credentials.json" "$CLAUDE_DIR/.credentials.json"
     chmod 600 "$CLAUDE_DIR/.credentials.json"
 
-    # Keep only MCP servers; seed a single /workspace project so the UI
-    # has something to open on first boot. Drop host projects to avoid
-    # dead-link entries pointing at paths that don't exist in-container.
-    # Rewrite the snipeit MCP server URL to MCP_URL so the container
-    # reaches MCP over docker DNS (snipeit-mcp:8000) instead of the
-    # host-loopback URL baked into the host's config.
+    # Keep host's MCP servers, force-register the snipeit one pointing at
+    # the sibling container over docker DNS (overrides whatever — if
+    # anything — was on the host), and seed a single /workspace project
+    # so the UI has something to open on first boot. Drop host projects
+    # to avoid dead-link entries pointing at paths that don't exist
+    # in-container.
     jq --arg mcp_url "${MCP_URL:-http://snipeit-mcp:8000/mcp/}" '{
         mcpServers: (
             (.mcpServers // {})
-            | if has("snipeit") then .snipeit.url = $mcp_url else . end
+            | .snipeit = {"type": "http", "url": $mcp_url}
         ),
         projects: {"/workspace": {}}
     }' "$SEED_CLAUDE_JSON" > "$CLAUDE_JSON"
