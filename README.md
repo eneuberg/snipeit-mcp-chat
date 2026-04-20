@@ -27,11 +27,14 @@ Two containers:
 The host's `~/.claude/` + `~/.claude.json` are bind-mounted read-only at
 `/seed/` inside the container. On first boot the entrypoint copies
 OAuth credentials and MCP server configuration into a named Docker volume
-(`webui_home`); from then on the container owns its own state. A second
-named volume (`webui_workspace`, mounted at `/workspace`) is the only
-scratch filesystem chat sessions can write to — the host home is not
-exposed. Configure once with `claude login` / `claude mcp add` before
-first build, and the container inherits it.
+(`webui_home`); from then on the container owns its own state. The
+`snipeit` MCP entry is re-asserted from `MCP_URL` on *every* boot, so
+a stale or empty `mcpServers` in `webui_home` self-heals on restart
+(no volume wipe needed). A second named volume (`webui_workspace`,
+mounted at `/workspace`) is the only scratch filesystem chat sessions
+can write to — the host home is not exposed. Configure once with
+`claude login` / `claude mcp add` before first build, and the container
+inherits it.
 
 ## Upstream bugs we patch
 
@@ -197,12 +200,11 @@ ran `claude login`.
    or a public URL (`https://inventory.example.com`) if it's hosted
    separately — the MCP container has normal outbound internet.
 4. **Deploy.** If the webui comes up but the snipeit MCP is missing
-   from the tools list, or `/api/projects` returns 500, the seed
-   happened against a stale or broken state — wipe the named volume
-   on the Coolify host and redeploy:
-   ```sh
-   docker volume rm <stack>_webui_home
-   ```
+   from the tools list, just `docker restart` the webui container —
+   the entrypoint re-asserts the `snipeit` MCP entry on every boot,
+   so a stale `webui_home` self-heals without a volume wipe. Only
+   wipe `webui_home` (`docker volume rm <stack>_webui_home`) if
+   `/api/projects` returns 500 or credentials look broken.
 
 ### 3. Bind port 8080 to Tailscale only
 
@@ -329,7 +331,7 @@ in the shell you ran `docker compose` in, and override
 | Symptom | Cause |
 |---|---|
 | `FATAL: seed file /seed/claude.json is missing` in entrypoint logs | Host file at `CLAUDE_CONFIG_FILE` doesn't exist, OR the volume mount was silently dropped (on Coolify, check you replaced every `${...}` in volume sources with literal paths). Bind-mounting a non-existent file creates an empty dir, which also trips this check. |
-| UI loads but the snipeit MCP is missing from the tools list | Stale `webui_home` — the first-boot seed already happened, so later changes to the host config or to the entrypoint don't take effect. Wipe the volume (`docker volume rm <stack>_webui_home`) and redeploy. |
+| UI loads but the snipeit MCP is missing from the tools list | The entrypoint re-asserts the `snipeit` MCP entry on every boot, so a `docker compose restart webui` (or Coolify redeploy) normally fixes this. If it persists, `MCP_URL` in the env is wrong or the `snipeit-mcp` container isn't reachable on the docker network. |
 | UI says "Not logged in" after a fresh seed | Bind-mounted `.credentials.json` is from the wrong user. On Coolify, `${HOME}` resolves to `/root`, not the user you ran `claude login` as — hardcode the real user's home in the compose volume lines. |
 | MCP is registered but tools return connection errors | `snipeit-mcp` can't reach the URL in `SNIPEIT_URL`. Check `docker compose logs snipeit-mcp` and, from inside that container, `curl -I $SNIPEIT_URL/api/v1/statuslabels` with the token. If Snipe-IT is in another compose stack, the two networks aren't connected — either use its public URL or attach both stacks to an external network. |
 
@@ -427,3 +429,27 @@ snipeit-chat-stack/
 
 Both images build from source / upstream releases — no vendored forks.
 Upstream fixes land on your next `docker compose build --no-cache`.
+
+## TODO — first-install hardening
+
+The entrypoint now self-heals a missing `snipeit` MCP entry, but
+first-install still has a few sharp edges (especially on Coolify,
+where `${HOME}` is `/root` and bind-mount typos fail silently).
+Candidate improvements, roughly highest-leverage first:
+
+- **Docker healthchecks on both services.** Today `docker compose ps`
+  / Coolify's UI report containers as healthy even when the MCP is
+  unregistered or unreachable. A healthcheck that `curl`s
+  `snipeit-mcp:8000/mcp/` from webui (and `localhost:8000` from the
+  MCP container) would flip them red on real failures.
+- **Boot-time self-test in `webui/entrypoint.sh`.** After writing
+  `.claude.json`, `curl` the MCP URL once; log a loud warning if it
+  doesn't return 307/200. Catches DNS / env / network problems
+  before a user opens the UI.
+- **`./preflight.sh` helper.** Validates before `docker compose up`:
+  host `.claude/.credentials.json` exists and is readable by UID
+  1000, `SNIPEIT_URL` + token return 200, `MCP_URL` resolves. Prints
+  what's wrong instead of making users grep container logs.
+- **Coolify-specific compose file** (`docker-compose.coolify.yml`)
+  with the literal-path / no-`ports:` edits already applied, so new
+  users don't have to hand-edit in Coolify's compose editor.
