@@ -245,6 +245,41 @@ absolute path is appended to your message — Claude reads it via its
 Prune uploads with
 `docker compose exec webui rm -rf /workspace/_uploads/*`.
 
+### 5. Tune the bot (optional, recommended)
+
+The bot's operating manual lives at `/workspace/CLAUDE.md` inside
+the container, seeded from `webui/workspace-template/` on first
+boot. It defines tone (German default, English Snipe-IT terms with
+a short German gloss in parentheses on first use), transparency
+rules (announce writes, stay quiet on reads), and playbooks for
+common flows (create-asset-from-photo, checkout, checkin, archive,
+delete).
+
+Alongside it, `/workspace/knowledge/` holds a lightweight
+file-based knowledge base the bot reads on demand — effectively a
+poor-man's RAG without a vector DB:
+
+- `categories.md` — keyword → Snipe-IT Category mapping.
+- `locations.md` — room name aliases.
+- `manufacturers.md` — vendor aliases.
+- `conventions.md` — Techcenter house rules (tag scheme, defaults).
+- `decisions.md` — append-only log the bot writes itself after
+  notable actions, so the next session has context from the last.
+
+Two edit paths:
+
+```sh
+# From the host, edit in-container:
+docker compose exec webui $EDITOR /workspace/knowledge/categories.md
+
+# Or just ask the bot in chat: "pass categories.md an, Laptops
+# sollen auch 'surface' als Keyword haben" — it'll edit the file.
+```
+
+The entrypoint only seeds files that don't already exist, so your
+edits survive restarts and image updates. To reset a file to the
+shipped default, delete it and restart the container.
+
 ## Cheat sheet
 
 Everyday ops — all run from the repo root on the Docker host.
