@@ -6,16 +6,18 @@ CLAUDE_JSON=/home/node/.claude.json
 SEED_CLAUDE_DIR=/seed/claude
 SEED_CLAUDE_JSON=/seed/claude.json
 
-# First-boot seed only. Copies OAuth creds + MCP config from the host
+MCP_URL_EFFECTIVE="${MCP_URL:-http://snipeit-mcp:8000/mcp/}"
+
+# First-boot seed. Copies OAuth creds + MCP config from the host
 # read-only mounts into the container's named-volume home. Never
-# overwrites existing container state, so refreshed tokens and session
-# history persist across restarts.
+# overwrites existing credentials or session history on subsequent
+# boots — refreshed tokens persist.
 #
 # Fail-closed: if the named volume is empty AND the host seed is
 # missing, exit 1 instead of booting a broken container (webui's
 # /api/projects 500s loudly in that state, which is hard to diagnose).
 if [ -f "$CLAUDE_JSON" ]; then
-    echo "[entrypoint] $CLAUDE_JSON already present — using forked state in the named volume. Wipe webui_home to re-seed from the host."
+    echo "[entrypoint] $CLAUDE_JSON already present — keeping forked state."
 else
     if [ ! -f "$SEED_CLAUDE_JSON" ]; then
         echo "[entrypoint] FATAL: seed file $SEED_CLAUDE_JSON is missing." >&2
@@ -33,21 +35,27 @@ else
     cp "$SEED_CLAUDE_DIR/.credentials.json" "$CLAUDE_DIR/.credentials.json"
     chmod 600 "$CLAUDE_DIR/.credentials.json"
 
-    # Keep host's MCP servers, force-register the snipeit one pointing at
-    # the sibling container over docker DNS (overrides whatever — if
-    # anything — was on the host), and seed a single /workspace project
-    # so the UI has something to open on first boot. Drop host projects
-    # to avoid dead-link entries pointing at paths that don't exist
-    # in-container.
-    jq --arg mcp_url "${MCP_URL:-http://snipeit-mcp:8000/mcp/}" '{
-        mcpServers: (
-            (.mcpServers // {})
-            | .snipeit = {"type": "http", "url": $mcp_url}
-        ),
+    # Drop host projects to avoid dead-link entries pointing at paths
+    # that don't exist in-container. Seed a single /workspace project
+    # so the UI has something to open on first boot. The snipeit MCP
+    # entry is asserted below, unconditionally, on every boot.
+    jq '{
+        mcpServers: (.mcpServers // {}),
         projects: {"/workspace": {}}
     }' "$SEED_CLAUDE_JSON" > "$CLAUDE_JSON"
     chmod 600 "$CLAUDE_JSON"
 fi
+
+# Always re-assert the snipeit MCP entry pointing at the sibling
+# container over docker DNS. Idempotent — protects against stale
+# webui_home volumes seeded before this logic existed, or with an
+# MCP_URL that has since changed.
+tmp=$(mktemp)
+jq --arg mcp_url "$MCP_URL_EFFECTIVE" \
+    '.mcpServers = ((.mcpServers // {}) | .snipeit = {"type": "http", "url": $mcp_url})' \
+    "$CLAUDE_JSON" > "$tmp" && mv "$tmp" "$CLAUDE_JSON"
+chmod 600 "$CLAUDE_JSON"
+echo "[entrypoint] snipeit MCP registered at $MCP_URL_EFFECTIVE"
 
 # webui's /api/projects intersects .claude.json projects keys with
 # actually-existing ~/.claude/projects/<encoded>/ dirs. It has no
