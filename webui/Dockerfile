@@ -25,6 +25,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # into the container's named-volume home on first start only.
 COPY --chmod=755 entrypoint.sh /usr/local/bin/webui-entrypoint
 
+# Bot operating manual + knowledge base template. Entrypoint copies
+# any missing file from here into /workspace on boot, never
+# overwriting user edits. Lets the Techcenter operator curate
+# categories / locations / manufacturers / conventions in-place.
+COPY --chown=node:node workspace-template /seed/workspace
+
 # HTML-injection proxy that adds an "Add project" button to the upstream
 # UI and exposes /_ext/add-project for registering new project paths.
 # Runs in front of claude-code-webui (which it spawns internally on

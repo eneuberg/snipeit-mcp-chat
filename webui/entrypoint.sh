@@ -62,4 +62,19 @@ echo "[entrypoint] snipeit MCP registered at $MCP_URL_EFFECTIVE"
 # "add project" UI — both sides must exist for a project to show up.
 mkdir -p "$CLAUDE_DIR/projects/-workspace"
 
+# Seed the bot's operating manual + knowledge base into /workspace.
+# Copies only files that don't already exist — user edits survive
+# container restarts and image rebuilds. Silent if the template
+# directory isn't baked in.
+if [ -d /seed/workspace ]; then
+    (cd /seed/workspace && find . -type f) | while read -r rel; do
+        target="/workspace/${rel#./}"
+        if [ -e "$target" ]; then
+            continue
+        fi
+        mkdir -p "$(dirname "$target")"
+        cp "/seed/workspace/${rel#./}" "$target"
+    done
+fi
+
 exec "$@"
