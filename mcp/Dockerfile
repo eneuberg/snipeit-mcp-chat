@@ -1,10 +1,19 @@
-# Local build for jameshgordy/snipeit-mcp with fixes we can't land upstream:
-#   1. Pin fastmcp to 2.12.4 (from upstream uv.lock). Upstream's Dockerfile
-#      installs with `uv pip install .` which ignores the lockfile and pulls
-#      the latest fastmcp — newer versions no longer expose `_tool_manager`,
-#      which server.py references unconditionally (line 5410/5418).
-#   2. Launch over HTTP via `mcp.run(transport="http", ...)` — the upstream
-#      runtime image doesn't have the `fastmcp` CLI on PATH.
+# Builds the Snipe-IT MCP server from our fork (eneuberg/snipeit-mcp).
+#
+# The fork carries three modifications on top of upstream:
+#   1. fastmcp pinned to 2.12.4 (newer versions drop _tool_manager,
+#      which server.py references for the SNIPEIT_ALLOWED_TOOLS
+#      whitelist).
+#   2. asset_thumbnail tool — sets the main header image on an asset,
+#      which upstream asset_files (Files-tab only) doesn't cover.
+#   3. Pillow-based compression on both asset_thumbnail and
+#      asset_files to keep uploads under Snipe-IT's 25 MB cap without
+#      libvips overhead on Pi-class hardware.
+#
+# One patch still lives here, not in the fork: the snipeit-api client
+# library rejects plain http:// URLs for non-localhost hosts. That's
+# an external dependency (lfctech/snipeit-python-api), not ours to
+# edit at the fork level.
 
 FROM python:3.12-slim AS builder
 
@@ -12,11 +21,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-RUN git clone --depth 1 https://github.com/jameshgordy/snipeit-mcp.git .
+RUN git clone --depth 1 https://github.com/eneuberg/snipeit-mcp.git .
 
 RUN pip install --no-cache-dir uv \
-    && uv pip install --system --no-cache . \
-    && pip install --no-cache-dir "fastmcp==2.12.4" "Pillow>=10.4"
+    && uv pip install --system --no-cache .
 
 FROM python:3.12-slim
 
@@ -26,17 +34,14 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin/ /usr/local/bin/
 
 WORKDIR /app
-# Patch snipeit-api client: allow plain http:// URLs (not just https:// / localhost)
+# Patch snipeit-api client: allow plain http:// URLs (not just https:// / localhost).
+# External dependency — can't land this in our fork of snipeit-mcp itself.
 RUN python3 -c "import pathlib; p=pathlib.Path('/usr/local/lib/python3.12/site-packages/snipeit/client.py'); t=p.read_text(); t=t.replace('\"http://localhost\"','\"http://\"'); p.write_text(t)"
 COPY --from=builder --chown=appuser:appuser /build/server.py ./
+COPY --from=builder --chown=appuser:appuser /build/compression.py ./
+COPY --from=builder --chown=appuser:appuser /build/asset_thumbnail_tool.py ./
+COPY --from=builder --chown=appuser:appuser /build/asset_files_compression.py ./
 COPY --from=builder --chown=appuser:appuser /build/prompts/ prompts/
-
-# Local extension: `asset_thumbnail` tool — the upstream MCP only covers the
-# Files-tab upload via `asset_files`; this adds the main-image (thumbnail)
-# endpoint. Registered by importing the module just before the allowed-tools
-# whitelist filter runs, so the tool name is subject to SNIPEIT_ALLOWED_TOOLS.
-COPY --chown=appuser:appuser asset_thumbnail_tool.py ./
-RUN sed -i '/^SNIPEIT_ALLOWED_TOOLS = os.getenv/i import asset_thumbnail_tool  # noqa: F401 -- registers asset_thumbnail via @mcp.tool side effect\n' /app/server.py
 
 USER appuser
 
