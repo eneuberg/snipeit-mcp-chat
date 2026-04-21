@@ -16,7 +16,7 @@ RUN git clone --depth 1 https://github.com/jameshgordy/snipeit-mcp.git .
 
 RUN pip install --no-cache-dir uv \
     && uv pip install --system --no-cache . \
-    && pip install --no-cache-dir "fastmcp==2.12.4"
+    && pip install --no-cache-dir "fastmcp==2.12.4" "Pillow>=10.4"
 
 FROM python:3.12-slim
 
