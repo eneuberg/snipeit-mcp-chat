@@ -488,3 +488,19 @@ Candidate improvements, roughly highest-leverage first:
 - **Coolify-specific compose file** (`docker-compose.coolify.yml`)
   with the literal-path / no-`ports:` edits already applied, so new
   users don't have to hand-edit in Coolify's compose editor.
+- **Easier Claude account switching.** Swapping the logged-in Claude
+  account today requires wiping the `webui_home` named volume (or
+  `rm`-ing `/home/node/.claude.json` + `.credentials.json` inside the
+  container) and restarting — Coolify's compose mode locks the volume
+  UI, so it's SSH-or-`exec` only. Should be a one-click "re-seed
+  credentials" action or a `./reset-auth.sh` helper.
+- **Expose CLI slash-commands like `/usage`, `/login`, `/logout`.**
+  claude-code-webui wraps the SDK, not the CLI, so the built-in slash
+  commands aren't reachable from the chat. Either proxy them through
+  or surface the most useful ones (usage, cost, model switch) as UI
+  buttons.
+- **Login screen in the webui.** Auth is currently "whatever OAuth
+  token the host seeded" — no per-user login, no logout, no account
+  switch from the UI. A minimal login screen (OAuth flow → writes
+  `.credentials.json` into the volume) would remove the whole
+  volume-reset dance.
