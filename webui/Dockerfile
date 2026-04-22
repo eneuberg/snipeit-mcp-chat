@@ -1,65 +1,49 @@
-FROM node:22-slim
+ARG FORK_REPO=https://github.com/eneuberg/claude-code-webui.git
+ARG FORK_REF=main
 
-ARG WEBUI_VERSION=0.1.56
-# TARGETARCH is auto-provided by BuildKit/buildx (amd64 on x86_64, arm64
-# on Raspberry Pi 4/5 64-bit). Fall back to the host's dpkg arch for
-# plain `docker build` without BuildKit. Upstream releases two binaries:
-# claude-code-webui-linux-x64 and claude-code-webui-linux-arm64.
-ARG TARGETARCH
-
+# ---- Builder: build frontend + backend bundle from our fork ----
+FROM node:22-slim AS builder
+ARG FORK_REPO
+ARG FORK_REF
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl jq tini \
+      ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN git clone --depth 1 --branch "${FORK_REF}" "${FORK_REPO}" .
+RUN cd frontend && npm ci && npm run build
+RUN cd backend && npm ci && npm run build
+
+# ---- Runtime ----
+FROM node:22-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates jq tini \
     && rm -rf /var/lib/apt/lists/* \
-    && arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
-    && case "$arch" in \
-         amd64) webui_arch=linux-x64 ;; \
-         arm64) webui_arch=linux-arm64 ;; \
-         *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
-       esac \
-    && curl -fsSL -o /usr/local/bin/claude-code-webui \
-         "https://github.com/sugyan/claude-code-webui/releases/download/${WEBUI_VERSION}/claude-code-webui-${webui_arch}" \
-    && chmod +x /usr/local/bin/claude-code-webui \
     && npm install -g @anthropic-ai/claude-code
 
-# First-boot seed: copies OAuth + MCP config from read-only /seed mounts
-# into the container's named-volume home on first start only.
-COPY --chmod=755 entrypoint.sh /usr/local/bin/webui-entrypoint
+# Install webui bundle + runtime deps (externalised by esbuild).
+WORKDIR /opt/webui
+COPY --from=builder /build/backend/package.json ./package.json
+COPY --from=builder /build/backend/package-lock.json ./package-lock.json
+RUN npm ci --omit=dev
+COPY --from=builder /build/backend/dist ./dist
 
-# Bot operating manual + knowledge base template. Entrypoint copies
-# any missing file from here into /workspace on boot, never
-# overwriting user edits. Lets the Techcenter operator curate
-# categories / locations / manufacturers / conventions in-place.
+# First-boot seed + knowledge base template (unchanged).
+COPY --chmod=755 entrypoint.sh /usr/local/bin/webui-entrypoint
 COPY --chown=node:node workspace-template /seed/workspace
 
-# HTML-injection proxy that adds an "Add project" button to the upstream
-# UI and exposes /_ext/add-project for registering new project paths.
-# Runs in front of claude-code-webui (which it spawns internally on
-# 127.0.0.1:8079).
-COPY --chmod=644 proxy.js /usr/local/bin/webui-proxy.js
+# `claude` uses `#!/usr/bin/env node`; SDK spawns it with restricted PATH.
+RUN ln -s /usr/local/bin/node /usr/bin/node \
+    && install -d -o node -g node -m 755 /workspace
 
-# The `claude` binary installed via npm uses `#!/usr/bin/env node`. The
-# Deno-bundled SDK inside webui spawns claude with a restricted PATH that
-# doesn't include /usr/local/bin, so `env node` can't find the interpreter
-# (ENOENT). Symlink node into /usr/bin (which is always in PATH) so the
-# shebang resolves regardless of the child env. Keep the original claude
-# symlink intact so webui's script-path detection still works.
-RUN ln -s /usr/local/bin/node /usr/bin/node
-
-# Create /workspace owned by node. The named volume mounted here at
-# runtime inherits ownership from this dir on first boot, so the node
-# user can write to its own scratch filesystem.
-RUN install -d -o node -g node -m 755 /workspace
-
-# node:22-slim ships a `node` user at UID 1000 already — reuse it so
-# bind-mounted ~/.claude stays writable with host perms.
 USER node
 WORKDIR /home/node
 
-ENV PORT=3583 HOST=0.0.0.0
+ENV PORT=3583 HOST=0.0.0.0 \
+    WEBUI_PROJECT_ROOT=/workspace \
+    WEBUI_UPLOAD_DIR=/workspace/_uploads
 
 EXPOSE 3583
 ENTRYPOINT ["tini", "--", "webui-entrypoint"]
-# The proxy binds :$PORT (default 3583) and spawns claude-code-webui on
-# 127.0.0.1:8079 internally, passing --claude-path so the SDK spawn
-# doesn't ENOENT.
-CMD ["node", "/usr/local/bin/webui-proxy.js"]
+CMD ["node", "/opt/webui/dist/cli/node.js", \
+     "--host", "0.0.0.0", "--port", "3583", \
+     "--claude-path", "/usr/local/bin/claude"]

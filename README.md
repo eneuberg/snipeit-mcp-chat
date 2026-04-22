@@ -17,8 +17,10 @@ Two containers:
 - **`snipeit-mcp`** — wraps [jameshgordy/snipeit-mcp](https://github.com/jameshgordy/snipeit-mcp)
   with the patches listed below. Exposes Snipe-IT's API as MCP tools over
   Streamable-HTTP. Published on `127.0.0.1:8765` only (not tailnet-reachable).
-- **`webui`** — [sugyan/claude-code-webui](https://github.com/sugyan/claude-code-webui)
-  with the patches listed below. Shells out to the `claude` CLI (bundled in
+- **`webui`** — our fork
+  [eneuberg/claude-code-webui](https://github.com/eneuberg/claude-code-webui)
+  of sugyan/claude-code-webui, built from source into the image
+  (see patches/features below). Shells out to the `claude` CLI (bundled in
   the image) which talks to `snipeit-mcp` using the MCP config in your
   host's `~/.claude.json`. Uses `network_mode: host` and listens on `:8080`
   so the loopback MCP URL resolves identically in-container and the UI is
@@ -59,44 +61,37 @@ inherits it.
    fail inconsistently (some bypass the client and work, some don't), and
    Claude tends to invent plausible-sounding explanations about it.
 
-### `webui/Dockerfile` (3 fixes + 1 feature)
+### `webui/Dockerfile` (built from our fork)
 
-1. **Pin a specific release and download the prebuilt binary.** `npm
-   install -g claude-code-webui` is advertised but unreliable; the GitHub
-   release ships Deno-compiled standalone binaries. We pick between
-   `claude-code-webui-linux-x64` and `-linux-arm64` automatically from
-   BuildKit's `TARGETARCH` (falls back to `dpkg --print-architecture`
-   for non-buildx builds), so the same Dockerfile works on x86_64 and
-   on Raspberry Pi 4/5 without editing anything.
+We build [eneuberg/claude-code-webui](https://github.com/eneuberg/claude-code-webui)
+from source in a multi-stage image (Node builder + Node runtime), rather
+than downloading upstream's Deno-compiled release. The fork is drop-in
+upstream-compatible and carries:
 
-2. **Pass `--claude-path /usr/local/bin/claude` at startup.** webui's own
-   PATH-based detection finds the CLI, but the embedded
-   `@anthropic-ai/claude-code` SDK spawns it separately and fails with
-   `ENOENT` unless the path is explicit.
+1. **"Add project" button** in the project-selector header. Calls
+   `POST /api/projects`, which edits `~/.claude.json`, creates the
+   encoded `~/.claude/projects/<encoded>/` dir, and `mkdir -p`s the
+   target path so chat sessions can open it without ENOENT. Replaces
+   the old HTML-injection `proxy.js` hack.
+2. **Paperclip upload button** inside the chat input. Calls
+   `POST /api/uploads`; on mobile opens the camera, on desktop the
+   file picker. Uploaded path is appended to the textarea so Claude
+   can read it with the `Read` tool.
+3. **`WEBUI_PROJECT_ROOT` / `WEBUI_UPLOAD_DIR` env vars** so the
+   container can point workspaces at `/workspace` and uploads at
+   `/workspace/_uploads`.
 
-3. **Symlink `node` into `/usr/bin`.** The SDK spawns `claude` (which has
-   an `#!/usr/bin/env node` shebang) with a restricted PATH that doesn't
-   include `/usr/local/bin`, so `env node` can't find the interpreter.
-   Adding `/usr/bin/node → /usr/local/bin/node` makes the shebang resolve
-   regardless of child env.
+Still needed on top of the fork, to work around SDK-spawn quirks:
 
-4. **Ship `proxy.js` as the container CMD.** webui has no "Add project"
-   UI and its `/api/projects` endpoint requires an entry both in
-   `~/.claude.json` and as an encoded dir under `~/.claude/projects/`.
-   Our `webui/proxy.js` is a ~150-line Node script that binds `:8080`,
-   spawns `claude-code-webui` internally on `127.0.0.1:8079`, forwards
-   all traffic, and:
-   - Injects a `<script src="/_ext/inject.js">` tag into the HTML
-     response for `/`. The script uses a MutationObserver to find the
-     existing "Open settings" button and insert a matching `+` button
-     next to it.
-   - Serves `POST /_ext/add-project` which validates the path, edits
-     `~/.claude.json` (`projects[path] = {}`), creates the encoded
-     `~/.claude/projects/<encoded>/` dir, and `mkdir -p`s the path
-     itself so chat sessions can `cd` into it without ENOENT.
-
-   No upstream fork — delete `proxy.js` and revert the `CMD` line to
-   fall back to plain upstream behaviour.
+- **Pass `--claude-path /usr/local/bin/claude` at startup.** webui's own
+  PATH-based detection finds the CLI, but the embedded
+  `@anthropic-ai/claude-code` SDK spawns it separately and fails with
+  `ENOENT` unless the path is explicit.
+- **Symlink `node` into `/usr/bin`.** The SDK spawns `claude` (which has
+  an `#!/usr/bin/env node` shebang) with a restricted PATH that doesn't
+  include `/usr/local/bin`, so `env node` can't find the interpreter.
+  Adding `/usr/bin/node → /usr/local/bin/node` makes the shebang resolve
+  regardless of child env.
 
 ## Volume layout
 
@@ -225,9 +220,10 @@ mounted.
 
 To add more working directories, use the `+` button in the UI header
 (next to the gear icon) and enter an absolute path, e.g.
-`/workspace/inventory`. The button is provided by `webui/proxy.js` — it
-writes to `~/.claude.json`, creates the encoded project dir, and
-`mkdir -p`s the path so the session can open it immediately.
+`/workspace/inventory`. The button is a native feature of our fork
+(`POST /api/projects`) — it writes to `~/.claude.json`, creates the
+encoded project dir, and `mkdir -p`s the path so the session can open
+it immediately.
 
 To attach a photo, use the paperclip button inside the chat input. On
 mobile it opens the camera directly; on desktop it opens the file
@@ -453,17 +449,17 @@ snipeit-chat-stack/
 ├── mcp/
 │   └── Dockerfile       # jameshgordy/snipeit-mcp + 3 patches
 └── webui/
-    ├── Dockerfile       # sugyan/claude-code-webui release binary
+    ├── Dockerfile       # multi-stage build of eneuberg/claude-code-webui
     │                    #   + @anthropic-ai/claude-code CLI
-    │                    #   + 3 patches for SDK spawn quirks
+    │                    #   + 2 patches for SDK spawn quirks
     ├── entrypoint.sh    # first-boot seed of OAuth + MCP config from
     │                    #   read-only /seed bind-mounts
-    └── proxy.js         # injects an "Add project" button into the UI
-                         #   and exposes /_ext/add-project
+    └── workspace-template/  # seeded into /workspace on first boot
 ```
 
-Both images build from source / upstream releases — no vendored forks.
-Upstream fixes land on your next `docker compose build --no-cache`.
+Both images build from our forks (eneuberg/snipeit-mcp,
+eneuberg/claude-code-webui). Upstream fixes land by rebasing the forks
+and rebuilding.
 
 ## TODO — first-install hardening
 
